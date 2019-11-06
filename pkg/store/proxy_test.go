@@ -683,7 +683,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
 				},
 			},
-			expectedWarningsLen: 2,
+			expectedWarningsLen: 3,
 		},
 		{
 			title: "partial response enabled; 1st store is fast, 2-3 is slow, 4th is fast;",
