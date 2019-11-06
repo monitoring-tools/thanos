@@ -529,7 +529,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
 				},
 			},
-			expectedWarningsLen: 2,
+			expectedWarningsLen: 3,
 		},
 	} {
 		if ok := t.Run(tc.title, func(t *testing.T) {
