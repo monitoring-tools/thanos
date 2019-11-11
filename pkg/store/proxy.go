@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"math"
 	"sort"
@@ -49,6 +50,8 @@ type ProxyStore struct {
 	selectorLabels labels.Labels
 
 	responseTimeout time.Duration
+	timeToFirstByte prometheus.Summary
+
 }
 
 // NewProxyStore returns a new ProxyStore that uses the given clients that implements storeAPI to fan-in all series to the client.
@@ -59,9 +62,20 @@ func NewProxyStore(
 	component component.StoreAPI,
 	selectorLabels labels.Labels,
 	responseTimeout time.Duration,
+	reg *prometheus.Registry,
 ) *ProxyStore {
 	if logger == nil {
 		logger = log.NewNopLogger()
+	}
+
+	timeToFirstByte := prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "thanos_query_time_to_recv",
+		Help: "Time to get part data from store(ms).",
+		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+	})
+
+	if reg != nil {
+		reg.MustRegister(timeToFirstByte)
 	}
 
 	s := &ProxyStore{
@@ -70,6 +84,7 @@ func NewProxyStore(
 		component:       component,
 		selectorLabels:  selectorLabels,
 		responseTimeout: responseTimeout,
+		timeToFirstByte: timeToFirstByte,
 	}
 	return s
 }
@@ -259,7 +274,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout))
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstByte))
 		}
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
@@ -319,6 +334,11 @@ type streamSeriesSet struct {
 	closeSeries     context.CancelFunc
 }
 
+type RecvResp struct{
+	r	*storepb.SeriesResponse
+	err error
+}
+
 func startStreamSeriesSet(
 	ctx context.Context,
 	logger log.Logger,
@@ -329,6 +349,7 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
+	timeToFirstByte prometheus.Summary,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -346,9 +367,43 @@ func startStreamSeriesSet(
 	go func() {
 		defer wg.Done()
 		defer close(s.recvCh)
-
 		for {
-			r, err := s.stream.Recv()
+			cctx := ctx
+			var cancel context.CancelFunc
+			timeoutMsg := fmt.Sprintf("failed to receive any data from %s", s.name)
+			if s.responseTimeout != 0 {
+				timeoutMsg = fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name)
+				cctx, cancel = context.WithTimeout(ctx, s.responseTimeout)
+				defer cancel()
+			}
+			rCh := make(chan *RecvResp, 1)
+			var rr *RecvResp
+			go func() {
+				t0 := time.Now()
+				r, err := s.stream.Recv() //long and block
+				t1 := time.Now()
+				timeToFirstByte.Observe(float64(t1.Sub(t0).Microseconds()))
+				rCh <- &RecvResp{r:r, err: err}
+			}()
+
+			select {
+			case <-cctx.Done():
+				s.closeSeries()
+				err := errors.Wrap(cctx.Err(), timeoutMsg)
+				if s.partialResponse {
+					level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
+					s.warnCh.send(storepb.NewWarnSeriesResponse(err))
+					return
+				}
+				s.errMtx.Lock()
+				s.err = err
+				s.errMtx.Unlock()
+				return
+			case rr = <-rCh:
+			}
+			close(rCh)
+			err := rr.err
+			r := rr.r
 
 			if err == io.EOF {
 				return
@@ -371,14 +426,12 @@ func startStreamSeriesSet(
 				s.warnCh.send(storepb.NewWarnSeriesResponse(errors.New(w)))
 				continue
 			}
-
 			select {
 			case s.recvCh <- r.GetSeries():
 				continue
 			case <-ctx.Done():
 				return
 			}
-
 		}
 	}()
 	return s
@@ -386,37 +439,8 @@ func startStreamSeriesSet(
 
 // Next blocks until new message is received or stream is closed or operation is timed out.
 func (s *streamSeriesSet) Next() (ok bool) {
-	ctx := s.ctx
-	timeoutMsg := fmt.Sprintf("failed to receive any data from %s", s.name)
-
-	if s.responseTimeout != 0 {
-		timeoutMsg = fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name)
-
-		timeoutCtx, done := context.WithTimeout(s.ctx, s.responseTimeout)
-		defer done()
-		ctx = timeoutCtx
-	}
-
-	select {
-	case s.currSeries, ok = <-s.recvCh:
-		return ok
-	case <-ctx.Done():
-		// closeSeries to shutdown a goroutine in startStreamSeriesSet.
-		s.closeSeries()
-
-		err := errors.Wrap(ctx.Err(), timeoutMsg)
-		if s.partialResponse {
-			level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
-			s.warnCh.send(storepb.NewWarnSeriesResponse(err))
-			return false
-		}
-		s.errMtx.Lock()
-		s.err = err
-		s.errMtx.Unlock()
-
-		level.Warn(s.logger).Log("err", err, "msg", "partial response disabled; aborting request")
-		return false
-	}
+	s.currSeries, ok = <-s.recvCh
+	return ok
 }
 
 func (s *streamSeriesSet) At() ([]storepb.Label, []storepb.AggrChunk) {
