@@ -459,7 +459,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 		expectedWarningsLen int
 	}{
 		{
-			title: "partial response disabled first thanos query is slow to respond",
+			title: "partial response disabled 1/2 thanos query is slow to respond",
 			storeAPIs: []Client{
 				&testClient{
 					StoreClient: &mockedStoreAPI{
@@ -494,7 +494,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 			expectedErr: errors.New("test: failed to receive any data in 4s from test: context deadline exceeded"),
 		},
 		{
-			title: "partial response disabled second thanos query is slow to respond",
+			title: "partial response disabled 2/2 thanos query is slow to respond",
 			storeAPIs: []Client{
 				&testClient{
 					StoreClient: &mockedStoreAPI{
@@ -529,7 +529,83 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 			expectedErr: errors.New("test: failed to receive any data in 4s from test: context deadline exceeded"),
 		},
 		{
-			title: "partial response enabled first thanos query is slow to respond",
+			title: "partial response disabled 2nd response of 1/2 thanos query is slow to respond",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{3, 1}, {4, 2}, {5, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{6, 1}, {7, 2}, {8, 3}}),
+						},
+						RespDuration: 10 * time.Second,
+						SlowRespIndex: 2,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:                 1,
+				MaxTime:                 300,
+				Matchers:                []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+				PartialResponseDisabled: true,
+			},
+			expectedErr: errors.New("test: failed to receive any data in 4s from test: context deadline exceeded"),
+		},
+		{
+			title: "partial response disabled 2nd response of 2/2 thanos query is slow to respond",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{3, 1}, {4, 2}, {5, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{6, 1}, {7, 2}, {8, 3}}),
+						},
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+						RespDuration: 10 * time.Second,
+						SlowRespIndex: 2,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:                 1,
+				MaxTime:                 300,
+				Matchers:                []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+				PartialResponseDisabled: true,
+			},
+			expectedErr: errors.New("test: failed to receive any data in 4s from test: context deadline exceeded"),
+		},
+		{
+			title: "partial response enabled 1/2 thanos query is slow to respond",
 			storeAPIs: []Client{
 				&testClient{
 					StoreClient: &mockedStoreAPI{
@@ -569,7 +645,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 			expectedWarningsLen: 2,
 		},
 		{
-			title: "partial response enabled second thanos query is slow to respond",
+			title: "partial response enabled 2/2 thanos query is slow to respond",
 			storeAPIs: []Client{
 				&testClient{
 					StoreClient: &mockedStoreAPI{
@@ -607,6 +683,121 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 				},
 			},
 			expectedWarningsLen: 2,
+		},
+		{
+			title: "partial response enabled 2,3/4 thanos query is slow to respond",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("b", "c"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+						RespDuration: 10 * time.Second,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("c", "d"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+						RespDuration: 10 * time.Second,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("d", "f"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:  1,
+				MaxTime:  300,
+				Matchers: []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+			},
+			expectedSeries: []rawSeries{
+				{
+					lset:   []storepb.Label{{Name: "a", Value: "b"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+				{
+					lset:   []storepb.Label{{Name: "d", Value: "f"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+			},
+			expectedWarningsLen: 4,
+		},
+		{
+			title: "partial response enabled second response of 1/2 thanos query is slow to respond",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{4, 1}, {5, 2}, {6, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{7, 1}, {8, 2}, {9, 3}}),
+						},
+						RespDuration: 10 * time.Second,
+						SlowRespIndex: 2,
+
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storepb.NewWarnSeriesResponse(errors.New("warning")),
+							storeSeriesResponse(t, labels.FromStrings("b", "c"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+						},
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:  1,
+				MaxTime:  300,
+				Matchers: []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+			},
+			expectedSeries: []rawSeries{
+				{
+					lset:   []storepb.Label{{Name: "a", Value: "b"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+				{
+					lset:   []storepb.Label{{Name: "b", Value: "c"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+			},
+			expectedWarningsLen: 3,
 		},
 	} {
 		if ok := t.Run(tc.title, func(t *testing.T) {
@@ -1064,6 +1255,7 @@ type mockedStoreAPI struct {
 	RespLabelNames  *storepb.LabelNamesResponse
 	RespError       error
 	RespDuration    time.Duration
+	SlowRespIndex	int
 
 	LastSeriesReq      *storepb.SeriesRequest
 	LastLabelValuesReq *storepb.LabelValuesRequest
@@ -1077,7 +1269,7 @@ func (s *mockedStoreAPI) Info(ctx context.Context, req *storepb.InfoRequest, _ .
 func (s *mockedStoreAPI) Series(ctx context.Context, req *storepb.SeriesRequest, _ ...grpc.CallOption) (storepb.Store_SeriesClient, error) {
 	s.LastSeriesReq = req
 
-	return &StoreSeriesClient{ctx: ctx, respSet: s.RespSeries, respDur: s.RespDuration}, s.RespError
+	return &StoreSeriesClient{ctx: ctx, respSet: s.RespSeries, respDur: s.RespDuration, slowRespIndex: s.SlowRespIndex}, s.RespError
 }
 
 func (s *mockedStoreAPI) LabelNames(ctx context.Context, req *storepb.LabelNamesRequest, _ ...grpc.CallOption) (*storepb.LabelNamesResponse, error) {
@@ -1100,10 +1292,19 @@ type StoreSeriesClient struct {
 	i       int
 	respSet []*storepb.SeriesResponse
 	respDur time.Duration
+	slowRespIndex int
 }
 
 func (c *StoreSeriesClient) Recv() (*storepb.SeriesResponse, error) {
-	time.Sleep(c.respDur)
+	if c.respDur != 0 {
+		if c.slowRespIndex != 0 {
+			if c.i == c.slowRespIndex {
+				time.Sleep(c.respDur)
+			}
+		} else {
+			time.Sleep(c.respDur)
+		}
+	}
 
 	if c.i >= len(c.respSet) {
 		return nil, io.EOF
