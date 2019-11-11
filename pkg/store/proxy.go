@@ -50,7 +50,8 @@ type ProxyStore struct {
 	selectorLabels labels.Labels
 
 	responseTimeout time.Duration
-	timeToFirstByte prometheus.Summary
+	timeToFirstChunk prometheus.Summary
+	timeToChunk prometheus.Summary
 
 }
 
@@ -68,14 +69,20 @@ func NewProxyStore(
 		logger = log.NewNopLogger()
 	}
 
-	timeToFirstByte := prometheus.NewSummary(prometheus.SummaryOpts{
+	timeToFirstChunk := prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "thanos_query_time_to_first_recv",
+		Help: "Time to get first part data from store(ms).",
+		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+	})
+	timeToChunk := prometheus.NewSummary(prometheus.SummaryOpts{
 		Name: "thanos_query_time_to_recv",
 		Help: "Time to get part data from store(ms).",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
 	})
 
 	if reg != nil {
-		reg.MustRegister(timeToFirstByte)
+		reg.MustRegister(timeToFirstChunk)
+		reg.MustRegister(timeToChunk)
 	}
 
 	s := &ProxyStore{
@@ -84,7 +91,8 @@ func NewProxyStore(
 		component:       component,
 		selectorLabels:  selectorLabels,
 		responseTimeout: responseTimeout,
-		timeToFirstByte: timeToFirstByte,
+		timeToFirstChunk: timeToFirstChunk,
+		timeToChunk: timeToChunk,
 	}
 	return s
 }
@@ -274,7 +282,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstByte))
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstChunk, s.timeToChunk))
 		}
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
@@ -349,7 +357,8 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
-	timeToFirstByte prometheus.Summary,
+	timeToFirstChunk prometheus.Summary,
+	timeToChunk prometheus.Summary,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -365,6 +374,7 @@ func startStreamSeriesSet(
 
 	wg.Add(1)
 	go func() {
+		metricsSended := false
 		defer wg.Done()
 		defer close(s.recvCh)
 		for {
@@ -382,7 +392,11 @@ func startStreamSeriesSet(
 				t0 := time.Now()
 				r, err := s.stream.Recv() //long and block
 				t1 := time.Now()
-				timeToFirstByte.Observe(float64(t1.Sub(t0).Microseconds()))
+				timeToChunk.Observe(float64(t1.Sub(t0).Microseconds()))
+				if !metricsSended {
+					timeToFirstChunk.Observe(float64(t1.Sub(t0).Microseconds()))
+					metricsSended = true
+				}
 				rCh <- &RecvResp{r:r, err: err}
 			}()
 
