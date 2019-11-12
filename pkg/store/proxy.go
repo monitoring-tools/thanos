@@ -42,6 +42,11 @@ type Client interface {
 	Addr() string
 }
 
+type proxyStoreMetrics struct {
+	firstRecvDuration *prometheus.SummaryVec
+	channelBlockedDuration *prometheus.SummaryVec
+}
+
 // ProxyStore implements the store API that proxies request to all given underlying stores.
 type ProxyStore struct {
 	logger         log.Logger
@@ -50,9 +55,31 @@ type ProxyStore struct {
 	selectorLabels labels.Labels
 
 	responseTimeout time.Duration
-	timeToFirstChunk *prometheus.SummaryVec
-	timeToChunk *prometheus.SummaryVec
+	metrics         *proxyStoreMetrics
 
+}
+
+func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
+	var m proxyStoreMetrics
+
+	m.channelBlockedDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Name: "thanos_proxy_recv_channel_blocked_duration",
+		Help: "Recv channel blocker duration(ms).",
+		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+	}, []string{"store"})
+
+	m.firstRecvDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Name: "thanos_proxy_first_recv_duration",
+		Help: "Time to get first part data from store(ms).",
+		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+	}, []string{"store"})
+
+	if reg != nil {
+		reg.MustRegister(m.channelBlockedDuration)
+		reg.MustRegister(m.firstRecvDuration)
+	}
+
+	return &m
 }
 
 // NewProxyStore returns a new ProxyStore that uses the given clients that implements storeAPI to fan-in all series to the client.
@@ -69,21 +96,7 @@ func NewProxyStore(
 		logger = log.NewNopLogger()
 	}
 
-	timeToFirstChunk := prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "thanos_query_time_to_first_recv",
-		Help: "Time to get first part data from store(ms).",
-		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-	}, []string{"store"})
-	timeToChunk := prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "thanos_query_time_to_recv",
-		Help: "Time to get part data from store(ms).",
-		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-	}, []string{"store"})
-
-	if reg != nil {
-		reg.MustRegister(timeToFirstChunk)
-		reg.MustRegister(timeToChunk)
-	}
+	metrics := newProxyStoreMetrics(reg)
 
 	s := &ProxyStore{
 		logger:          logger,
@@ -91,8 +104,7 @@ func NewProxyStore(
 		component:       component,
 		selectorLabels:  selectorLabels,
 		responseTimeout: responseTimeout,
-		timeToFirstChunk: timeToFirstChunk,
-		timeToChunk: timeToChunk,
+		metrics:         metrics,
 	}
 	return s
 }
@@ -279,10 +291,11 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 				continue
 			}
 
+		seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics, st.Addr()))
+		st.String()
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
-			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstChunk, s.timeToChunk, st.Addr()))
 		}
 
 
@@ -358,8 +371,7 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
-	timeToFirstChunk *prometheus.SummaryVec,
-	timeToChunk *prometheus.SummaryVec,
+	metrics *proxyStoreMetrics,
 	storeAddr string,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
@@ -394,9 +406,8 @@ func startStreamSeriesSet(
 				t0 := time.Now()
 				r, err := s.stream.Recv() //long and block
 				t1 := time.Now()
-				timeToChunk.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 				if !metricsSended {
-					timeToFirstChunk.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
+					metrics.firstRecvDuration.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 					metricsSended = true
 				}
 				rCh <- &RecvResp{r:r, err: err}
@@ -442,8 +453,11 @@ func startStreamSeriesSet(
 				s.warnCh.send(storepb.NewWarnSeriesResponse(errors.New(w)))
 				continue
 			}
+			t0 := time.Now()
 			select {
 			case s.recvCh <- r.GetSeries():
+				t1 := time.Now()
+				metrics.channelBlockedDuration.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 				continue
 			case <-ctx.Done():
 				return
