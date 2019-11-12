@@ -50,8 +50,8 @@ type ProxyStore struct {
 	selectorLabels labels.Labels
 
 	responseTimeout time.Duration
-	timeToFirstChunk prometheus.Summary
-	timeToChunk prometheus.Summary
+	timeToFirstChunk *prometheus.SummaryVec
+	timeToChunk *prometheus.SummaryVec
 
 }
 
@@ -69,16 +69,16 @@ func NewProxyStore(
 		logger = log.NewNopLogger()
 	}
 
-	timeToFirstChunk := prometheus.NewSummary(prometheus.SummaryOpts{
+	timeToFirstChunk := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "thanos_query_time_to_first_recv",
 		Help: "Time to get first part data from store(ms).",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-	})
-	timeToChunk := prometheus.NewSummary(prometheus.SummaryOpts{
+	}, []string{"store"})
+	timeToChunk := prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "thanos_query_time_to_recv",
 		Help: "Time to get part data from store(ms).",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-	})
+	}, []string{"store"})
 
 	if reg != nil {
 		reg.MustRegister(timeToFirstChunk)
@@ -282,8 +282,9 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstChunk, s.timeToChunk))
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.timeToFirstChunk, s.timeToChunk, st.Addr()))
 		}
+
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
 		if len(seriesSet) == 0 {
@@ -357,8 +358,9 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
-	timeToFirstChunk prometheus.Summary,
-	timeToChunk prometheus.Summary,
+	timeToFirstChunk *prometheus.SummaryVec,
+	timeToChunk *prometheus.SummaryVec,
+	storeAddr string,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -392,9 +394,9 @@ func startStreamSeriesSet(
 				t0 := time.Now()
 				r, err := s.stream.Recv() //long and block
 				t1 := time.Now()
-				timeToChunk.Observe(float64(t1.Sub(t0).Microseconds()))
+				timeToChunk.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 				if !metricsSended {
-					timeToFirstChunk.Observe(float64(t1.Sub(t0).Microseconds()))
+					timeToFirstChunk.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 					metricsSended = true
 				}
 				rCh <- &RecvResp{r:r, err: err}
