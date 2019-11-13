@@ -43,8 +43,11 @@ type Client interface {
 }
 
 type proxyStoreMetrics struct {
-	firstRecvDuration *prometheus.SummaryVec
-	channelBlockedDuration *prometheus.SummaryVec
+	firstRecvDuration		*prometheus.SummaryVec
+	channelBlockedDuration	*prometheus.SummaryVec
+	recvChannelSize			*prometheus.SummaryVec
+	writesToBlockedChannel	*prometheus.CounterVec
+	writesToFreeChannel		*prometheus.CounterVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -74,9 +77,28 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
 	}, []string{"store"})
 
+	m.recvChannelSize = prometheus.NewSummaryVec(prometheus.SummaryOpts{
+		Name: "thanos_proxy_recv_channel_size",
+		Help: "Size of recv buffered channel.",
+		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+	}, []string{"store"})
+
+	m.writesToBlockedChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "thanos_proxy_writes_to_blocked_recv_channel",
+		Help: "Count writes to blocked recv channel.",
+	}, []string{"store"})
+
+	m.writesToFreeChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "thanos_proxy_writes_to_free_recv_channel",
+		Help: "Count writes to free recv channel.",
+	}, []string{"store"})
+
 	if reg != nil {
 		reg.MustRegister(m.channelBlockedDuration)
 		reg.MustRegister(m.firstRecvDuration)
+		reg.MustRegister(m.recvChannelSize)
+		reg.MustRegister(m.writesToFreeChannel)
+		reg.MustRegister(m.writesToBlockedChannel)
 	}
 
 	return &m
@@ -452,6 +474,12 @@ func startStreamSeriesSet(
 			if w := r.GetWarning(); w != "" {
 				s.warnCh.send(storepb.NewWarnSeriesResponse(errors.New(w)))
 				continue
+			}
+			metrics.recvChannelSize.WithLabelValues(storeAddr).Observe(float64(len(s.recvCh)))
+			if len(s.recvCh) == 10 {
+				metrics.writesToBlockedChannel.WithLabelValues(storeAddr).Inc()
+			} else {
+				metrics.writesToFreeChannel.WithLabelValues(storeAddr).Inc()
 			}
 			t0 := time.Now()
 			select {
