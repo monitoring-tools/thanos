@@ -69,18 +69,21 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 		Name: "thanos_proxy_recv_channel_blocked_duration",
 		Help: "Recv channel blocker duration(ms).",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+		MaxAge: 2 * time.Minute,
 	}, []string{"store"})
 
 	m.firstRecvDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "thanos_proxy_first_recv_duration",
 		Help: "Time to get first part data from store(ms).",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+		MaxAge: 2 * time.Minute,
 	}, []string{"store"})
 
 	m.recvChannelSize = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name: "thanos_proxy_recv_channel_size",
 		Help: "Size of recv buffered channel.",
 		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
+		MaxAge: 2 * time.Minute,
 	}, []string{"store"})
 
 	m.writesToBlockedChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
