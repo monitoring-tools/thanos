@@ -3,13 +3,14 @@ package store
 import (
 	"context"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -30,7 +31,6 @@ import (
 type Client interface {
 	// Client to access the store.
 	storepb.StoreClient
-
 	// LabelSets that each apply to some data exposed by the backing store.
 	LabelSets() []storepb.LabelSet
 
@@ -43,11 +43,11 @@ type Client interface {
 }
 
 type proxyStoreMetrics struct {
-	firstRecvDuration		*prometheus.SummaryVec
-	channelBlockedDuration	*prometheus.SummaryVec
-	recvChannelSize			*prometheus.SummaryVec
-	writesToBlockedChannel	*prometheus.CounterVec
-	writesToFreeChannel		*prometheus.CounterVec
+	firstRecvDuration      *prometheus.SummaryVec
+	channelBlockedDuration *prometheus.SummaryVec
+	recvChannelSize        *prometheus.SummaryVec
+	writesToBlockedChannel *prometheus.CounterVec
+	writesToFreeChannel    *prometheus.CounterVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -59,31 +59,30 @@ type ProxyStore struct {
 
 	responseTimeout time.Duration
 	metrics         *proxyStoreMetrics
-
 }
 
 func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 	var m proxyStoreMetrics
 
 	m.channelBlockedDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "thanos_proxy_recv_channel_blocked_duration",
-		Help: "Recv channel blocker duration(ms).",
-		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-		MaxAge: 2 * time.Minute,
+		Name:       "thanos_proxy_recv_channel_blocked_duration",
+		Help:       "Recv channel blocker duration(ms).",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		MaxAge:     2 * time.Minute,
 	}, []string{"store"})
 
 	m.firstRecvDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "thanos_proxy_first_recv_duration",
-		Help: "Time to get first part data from store(ms).",
-		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-		MaxAge: 2 * time.Minute,
+		Name:       "thanos_proxy_first_recv_duration",
+		Help:       "Time to get first part data from store(ms).",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		MaxAge:     2 * time.Minute,
 	}, []string{"store"})
 
 	m.recvChannelSize = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name: "thanos_proxy_recv_channel_size",
-		Help: "Size of recv buffered channel.",
-		Objectives: map[float64]float64{0.5:0.05, 0.9:0.01, 0.99:0.001},
-		MaxAge: 2 * time.Minute,
+		Name:       "thanos_proxy_recv_channel_size",
+		Help:       "Size of recv buffered channel.",
+		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		MaxAge:     2 * time.Minute,
 	}, []string{"store"})
 
 	m.writesToBlockedChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -316,13 +315,12 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 				continue
 			}
 
-		seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
+			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
 				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics, st.Addr()))
-		st.String()
+			st.String()
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 		}
-
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
 		if len(seriesSet) == 0 {
@@ -381,8 +379,8 @@ type streamSeriesSet struct {
 	closeSeries     context.CancelFunc
 }
 
-type RecvResp struct{
-	r	*storepb.SeriesResponse
+type RecvResp struct {
+	r   *storepb.SeriesResponse
 	err error
 }
 
@@ -435,7 +433,7 @@ func startStreamSeriesSet(
 					metrics.firstRecvDuration.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
 					metricsSended = true
 				}
-				rCh <- &RecvResp{r:r, err: err}
+				rCh <- &RecvResp{r: r, err: err}
 			}()
 
 			select {
