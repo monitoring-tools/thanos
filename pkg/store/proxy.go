@@ -42,12 +42,13 @@ type Client interface {
 	Addr() string
 }
 
+type firstRecvMetrics struct {
+	payload   prometheus.Observer
+	noPayload prometheus.Observer
+}
+
 type proxyStoreMetrics struct {
-	firstRecvDuration      *prometheus.SummaryVec
-	channelBlockedDuration *prometheus.SummaryVec
-	recvChannelSize        *prometheus.SummaryVec
-	writesToBlockedChannel *prometheus.CounterVec
-	writesToFreeChannel    *prometheus.CounterVec
+	firstRecvDuration *prometheus.SummaryVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -64,43 +65,15 @@ type ProxyStore struct {
 func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 	var m proxyStoreMetrics
 
-	m.channelBlockedDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name:       "thanos_proxy_recv_channel_blocked_duration",
-		Help:       "Recv channel blocker duration(ms).",
-		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-		MaxAge:     2 * time.Minute,
-	}, []string{"store"})
-
 	m.firstRecvDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
 		Name:       "thanos_proxy_first_recv_duration",
 		Help:       "Time to get first part data from store(ms).",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 		MaxAge:     2 * time.Minute,
-	}, []string{"store"})
-
-	m.recvChannelSize = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name:       "thanos_proxy_recv_channel_size",
-		Help:       "Size of recv buffered channel.",
-		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-		MaxAge:     2 * time.Minute,
-	}, []string{"store"})
-
-	m.writesToBlockedChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "thanos_proxy_writes_to_blocked_recv_channel",
-		Help: "Count writes to blocked recv channel.",
-	}, []string{"store"})
-
-	m.writesToFreeChannel = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "thanos_proxy_writes_to_free_recv_channel",
-		Help: "Count writes to free recv channel.",
-	}, []string{"store"})
+	}, []string{"store", "payload"})
 
 	if reg != nil {
-		reg.MustRegister(m.channelBlockedDuration)
 		reg.MustRegister(m.firstRecvDuration)
-		reg.MustRegister(m.recvChannelSize)
-		reg.MustRegister(m.writesToFreeChannel)
-		reg.MustRegister(m.writesToBlockedChannel)
 	}
 
 	return &m
@@ -110,11 +83,11 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 // Note that there is no deduplication support. Deduplication should be done on the highest level (just before PromQL).
 func NewProxyStore(
 	logger log.Logger,
+	reg *prometheus.Registry,
 	stores func() []Client,
 	component component.StoreAPI,
 	selectorLabels labels.Labels,
 	responseTimeout time.Duration,
-	reg *prometheus.Registry,
 ) *ProxyStore {
 	if logger == nil {
 		logger = log.NewNopLogger()
@@ -314,10 +287,13 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 				respSender.send(storepb.NewWarnSeriesResponse(err))
 				continue
 			}
+			metrics := &firstRecvMetrics{
+				noPayload: s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), "0"),
+				payload:   s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), "1"),
+			}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics, st.Addr()))
-			st.String()
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, metrics))
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 		}
@@ -394,8 +370,7 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
-	metrics *proxyStoreMetrics,
-	storeAddr string,
+	metrics *firstRecvMetrics,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -411,35 +386,39 @@ func startStreamSeriesSet(
 
 	wg.Add(1)
 	go func() {
-		metricsSended := false
+		var isFirstRecv bool = true
 		defer wg.Done()
 		defer close(s.recvCh)
 		for {
-			cctx := ctx
 			var cancel context.CancelFunc
-			timeoutMsg := fmt.Sprintf("failed to receive any data from %s", s.name)
 			if s.responseTimeout != 0 {
-				timeoutMsg = fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name)
-				cctx, cancel = context.WithTimeout(ctx, s.responseTimeout)
+				ctx, cancel = context.WithTimeout(ctx, s.responseTimeout)
 				defer cancel()
 			}
 			rCh := make(chan *RecvResp, 1)
 			var rr *RecvResp
 			go func() {
 				t0 := time.Now()
-				r, err := s.stream.Recv() //long and block
-				t1 := time.Now()
-				if !metricsSended {
-					metrics.firstRecvDuration.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
-					metricsSended = true
+				r, err := s.stream.Recv()
+				if isFirstRecv {
+					if r.Size() > 0 {
+						metrics.payload.Observe(time.Since(t0).Seconds())
+					} else {
+						metrics.noPayload.Observe(time.Since(t0).Seconds())
+					}
+					isFirstRecv = false
 				}
 				rCh <- &RecvResp{r: r, err: err}
 			}()
 
 			select {
-			case <-cctx.Done():
+			case <-ctx.Done():
 				s.closeSeries()
-				err := errors.Wrap(cctx.Err(), timeoutMsg)
+				timeoutMsg := fmt.Sprintf("failed to receive any data from %s", s.name)
+				if s.responseTimeout != 0 {
+					timeoutMsg = fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name)
+				}
+				err := errors.Wrap(ctx.Err(), timeoutMsg)
 				if s.partialResponse {
 					level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
 					s.warnCh.send(storepb.NewWarnSeriesResponse(err))
@@ -476,21 +455,7 @@ func startStreamSeriesSet(
 				s.warnCh.send(storepb.NewWarnSeriesResponse(errors.New(w)))
 				continue
 			}
-			metrics.recvChannelSize.WithLabelValues(storeAddr).Observe(float64(len(s.recvCh)))
-			if len(s.recvCh) == 10 {
-				metrics.writesToBlockedChannel.WithLabelValues(storeAddr).Inc()
-			} else {
-				metrics.writesToFreeChannel.WithLabelValues(storeAddr).Inc()
-			}
-			t0 := time.Now()
-			select {
-			case s.recvCh <- r.GetSeries():
-				t1 := time.Now()
-				metrics.channelBlockedDuration.WithLabelValues(storeAddr).Observe(float64(t1.Sub(t0).Microseconds()))
-				continue
-			case <-ctx.Done():
-				return
-			}
+			s.recvCh <- r.GetSeries()
 		}
 	}()
 	return s
