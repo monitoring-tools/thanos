@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -539,8 +540,8 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{3, 1}, {4, 2}, {5, 3}}),
 							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{6, 1}, {7, 2}, {8, 3}}),
 						},
-						RespDuration:  10 * time.Second,
-						SlowRespIndex: 2,
+						RespDuration:    10 * time.Second,
+						SlowSeriesIndex: 2,
 					},
 					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
 					minTime:   1,
@@ -588,8 +589,8 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 							storepb.NewWarnSeriesResponse(errors.New("warning")),
 							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
 						},
-						RespDuration:  10 * time.Second,
-						SlowRespIndex: 2,
+						RespDuration:    10 * time.Second,
+						SlowSeriesIndex: 2,
 					},
 					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
 					minTime:   1,
@@ -762,8 +763,8 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{4, 1}, {5, 2}, {6, 3}}),
 							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{7, 1}, {8, 2}, {9, 3}}),
 						},
-						RespDuration:  10 * time.Second,
-						SlowRespIndex: 2,
+						RespDuration:    10 * time.Second,
+						SlowSeriesIndex: 2,
 					},
 					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
 					minTime:   1,
@@ -812,7 +813,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 
 			t0 := time.Now()
 			err := q.Series(tc.req, s)
-			t1 := time.Now()
+			elapsedTime := time.Since(t0)
 			if tc.expectedErr != nil {
 				testutil.NotOk(t, err)
 				testutil.Equals(t, tc.expectedErr.Error(), err.Error())
@@ -823,7 +824,8 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 
 			seriesEquals(t, tc.expectedSeries, s.SeriesSet)
 			testutil.Equals(t, tc.expectedWarningsLen, len(s.Warnings), "got %v", s.Warnings)
-			testutil.Assert(t, t1.Sub(t0) < 5*time.Second, "responseTimeout not working")
+
+			testutil.Assert(t, elapsedTime < 5*time.Second, fmt.Sprintf("Request has taken %f, expected: <%d, it seems that responseTimeout doesn't work properly.", elapsedTime.Seconds(), 5))
 		}); !ok {
 			return
 		}
@@ -1254,7 +1256,8 @@ type mockedStoreAPI struct {
 	RespLabelNames  *storepb.LabelNamesResponse
 	RespError       error
 	RespDuration    time.Duration
-	SlowRespIndex   int
+	// Index of series in store to slow response
+	SlowSeriesIndex int
 
 	LastSeriesReq      *storepb.SeriesRequest
 	LastLabelValuesReq *storepb.LabelValuesRequest
@@ -1268,7 +1271,7 @@ func (s *mockedStoreAPI) Info(ctx context.Context, req *storepb.InfoRequest, _ .
 func (s *mockedStoreAPI) Series(ctx context.Context, req *storepb.SeriesRequest, _ ...grpc.CallOption) (storepb.Store_SeriesClient, error) {
 	s.LastSeriesReq = req
 
-	return &StoreSeriesClient{ctx: ctx, respSet: s.RespSeries, respDur: s.RespDuration, slowRespIndex: s.SlowRespIndex}, s.RespError
+	return &StoreSeriesClient{ctx: ctx, respSet: s.RespSeries, respDur: s.RespDuration, slowSeriesIndex: s.SlowSeriesIndex}, s.RespError
 }
 
 func (s *mockedStoreAPI) LabelNames(ctx context.Context, req *storepb.LabelNamesRequest, _ ...grpc.CallOption) (*storepb.LabelNamesResponse, error) {
@@ -1287,22 +1290,26 @@ func (s *mockedStoreAPI) LabelValues(ctx context.Context, req *storepb.LabelValu
 type StoreSeriesClient struct {
 	// This field just exist to pseudo-implement the unused methods of the interface.
 	storepb.Store_SeriesClient
-	ctx           context.Context
-	i             int
-	respSet       []*storepb.SeriesResponse
-	respDur       time.Duration
-	slowRespIndex int
+	ctx             context.Context
+	i               int
+	respSet         []*storepb.SeriesResponse
+	respDur         time.Duration
+	slowSeriesIndex int
+}
+
+func (c *StoreSeriesClient) sleepBeforeRespond() {
+	if c.slowSeriesIndex != 0 {
+		if c.slowSeriesIndex == c.i {
+			time.Sleep(c.respDur)
+		}
+	} else {
+		time.Sleep(c.respDur)
+	}
 }
 
 func (c *StoreSeriesClient) Recv() (*storepb.SeriesResponse, error) {
 	if c.respDur != 0 {
-		if c.slowRespIndex != 0 {
-			if c.i == c.slowRespIndex {
-				time.Sleep(c.respDur)
-			}
-		} else {
-			time.Sleep(c.respDur)
-		}
+		c.sleepBeforeRespond()
 	}
 
 	if c.i >= len(c.respSet) {
