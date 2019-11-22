@@ -45,10 +45,12 @@ type Client interface {
 type firstRecvMetrics struct {
 	payload   prometheus.Observer
 	noPayload prometheus.Observer
+	timeout   prometheus.Counter
 }
 
 type proxyStoreMetrics struct {
 	firstRecvDuration *prometheus.SummaryVec
+	timeoutRecvCount  *prometheus.CounterVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -72,8 +74,14 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 		MaxAge:     2 * time.Minute,
 	}, []string{"store", "payload"})
 
+	m.timeoutRecvCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "thanos_proxy_timeout_recv_count",
+		Help: "Timeout recv count.",
+	}, []string{"store"})
+
 	if reg != nil {
 		reg.MustRegister(m.firstRecvDuration)
+		reg.MustRegister(m.timeoutRecvCount)
 	}
 
 	return &m
@@ -290,6 +298,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			metrics := &firstRecvMetrics{
 				noPayload: s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), "0"),
 				payload:   s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), "1"),
+				timeout:   s.metrics.timeoutRecvCount.WithLabelValues(st.Addr()),
 			}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
@@ -414,6 +423,7 @@ func startStreamSeriesSet(
 			select {
 			case <-ctx.Done():
 				s.closeSeries()
+				metrics.timeout.Inc()
 				timeoutMsg := fmt.Sprintf("failed to receive any data from %s", s.name)
 				if s.responseTimeout != 0 {
 					timeoutMsg = fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name)
