@@ -1,0 +1,5 @@
+- targets:
+  - prometheus-apps-thanos-sidecar-0.monitoring.prod.s.o3.ru:82
+  - thanos-store-system.monitoring.prod.s.o3.ru:82
+  - thanos-store-apps.monitoring.prod.s.o3.ru:82
+  - thanos-store-hw.monitoring.prod.s.o3.ru:82
