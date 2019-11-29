@@ -41,8 +41,8 @@ type Client interface {
 	Addr() string
 }
 
-const WITH_PAYLOAD_LABEL = "with_payload"
-const WITHOUT_PAYLOAD_LABEL = "without_payload"
+const withPayloadLabel = "with_payload"
+const withoutPayloadLabel = "without_payload"
 
 type firstRecvMetrics struct {
 	withPayload    prometheus.Observer
@@ -51,8 +51,9 @@ type firstRecvMetrics struct {
 }
 
 type proxyStoreMetrics struct {
-	firstRecvDuration *prometheus.SummaryVec
-	timeoutRecvCount  *prometheus.CounterVec
+	timeToFirstByte *prometheus.HistogramVec
+	//firstRecvDuration *prometheus.SummaryVec
+	timeoutRecvCount *prometheus.CounterVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -69,20 +70,20 @@ type ProxyStore struct {
 func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 	var m proxyStoreMetrics
 
-	m.firstRecvDuration = prometheus.NewSummaryVec(prometheus.SummaryOpts{
-		Name:       "thanos_proxy_first_recv_duration",
-		Help:       "Time to get first part data from store(ms).",
-		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-		MaxAge:     2 * time.Minute,
+	m.timeToFirstByte = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "thanos_proxy_time_to_first_byte_seconds",
+		Help:    "Time it took to sync meta files.",
+		Buckets: []float64{0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120, 240, 360, 720},
 	}, []string{"store", "payload"})
 
 	m.timeoutRecvCount = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "thanos_proxy_timeout_recv_count",
+		Name: "thanos_proxy_timeouted_requests_count",
 		Help: "Timeout recv count.",
 	}, []string{"store"})
 
 	if reg != nil {
-		reg.MustRegister(m.firstRecvDuration)
+		reg.MustRegister(m.timeToFirstByte)
+		//reg.MustRegister(m.firstRecvDuration)
 		reg.MustRegister(m.timeoutRecvCount)
 	}
 
@@ -299,10 +300,16 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			}
 
 			metrics := &firstRecvMetrics{
-				withoutPayload: s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITHOUT_PAYLOAD_LABEL),
-				withPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITH_PAYLOAD_LABEL),
+				withoutPayload: s.metrics.timeToFirstByte.WithLabelValues(st.Addr(), withoutPayloadLabel),
+				withPayload:    s.metrics.timeToFirstByte.WithLabelValues(st.Addr(), withPayloadLabel),
 				timeoutCount:   s.metrics.timeoutRecvCount.WithLabelValues(st.Addr()),
 			}
+
+			//metrics := &firstRecvMetrics{
+			//	withoutPayload: s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), withoutPayloadLabel),
+			//	withPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), withPayloadLabel),
+			//	timeoutCount:   s.metrics.timeoutRecvCount.WithLabelValues(st.Addr()),
+			//}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
 				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, metrics))
@@ -401,10 +408,14 @@ func startStreamSeriesSet(
 		isFirstRecv := true
 		defer wg.Done()
 		defer close(s.recvCh)
+		//rCh := make(chan *recvResponse, 1)
+		//defer close(rCh)
 		for {
+			//var frameTimeoutCtx context.Context
+			frameTimeoutCtx := context.Background()
 			var cancel context.CancelFunc
 			if s.responseTimeout != 0 {
-				ctx, cancel = context.WithTimeout(ctx, s.responseTimeout)
+				frameTimeoutCtx, cancel = context.WithTimeout(frameTimeoutCtx, s.responseTimeout)
 				defer cancel()
 			}
 			rCh := make(chan *recvResponse, 1)
@@ -426,13 +437,31 @@ func startStreamSeriesSet(
 			select {
 			case <-ctx.Done():
 				s.closeSeries()
+				//metrics.timeoutCount.Inc()
+				var err error
+				//if s.responseTimeout != 0 {
+				//	err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
+				//} else {
+				err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data from 123 %s", s.name))
+				//}
+				//if s.partialResponse {
+				//	level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
+				//	s.warnCh.send(storepb.NewWarnSeriesResponse(err))
+				//	return
+				//}
+				s.errMtx.Lock()
+				s.err = err
+				s.errMtx.Unlock()
+				return
+			case <-frameTimeoutCtx.Done():
+				s.closeSeries()
 				metrics.timeoutCount.Inc()
 				var err error
-				if s.responseTimeout != 0 {
-					err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
-				} else {
-					err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data from %s", s.name))
-				}
+				//if s.responseTimeout != 0 {
+				err = errors.Wrap(frameTimeoutCtx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
+				//} else {
+				//	err = errors.Wrap(frameTimeoutCtx.Err(), fmt.Sprintf("failed to receive any data from %s", s.name))
+				//}
 				if s.partialResponse {
 					level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
 					s.warnCh.send(storepb.NewWarnSeriesResponse(err))
@@ -445,15 +474,13 @@ func startStreamSeriesSet(
 			case rr = <-rCh:
 			}
 			close(rCh)
-			err := rr.err
-			r := rr.r
 
-			if err == io.EOF {
+			if rr.err == io.EOF {
 				return
 			}
 
-			if err != nil {
-				wrapErr := errors.Wrapf(err, "receive series from %s", s.name)
+			if rr.err != nil {
+				wrapErr := errors.Wrapf(rr.err, "receive series from %s", s.name)
 				if partialResponse {
 					s.warnCh.send(storepb.NewWarnSeriesResponse(wrapErr))
 					return
@@ -465,11 +492,11 @@ func startStreamSeriesSet(
 				return
 			}
 
-			if w := r.GetWarning(); w != "" {
+			if w := rr.r.GetWarning(); w != "" {
 				s.warnCh.send(storepb.NewWarnSeriesResponse(errors.New(w)))
 				continue
 			}
-			s.recvCh <- r.GetSeries()
+			s.recvCh <- rr.r.GetSeries()
 		}
 	}()
 	return s
