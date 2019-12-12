@@ -799,6 +799,84 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 			},
 			expectedWarningsLen: 3,
 		},
+		{
+			title: "partial response disabled; all stores respond 3s",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{4, 1}, {5, 2}, {6, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{7, 1}, {8, 2}, {9, 3}}),
+						},
+						RespDuration: 3 * time.Second,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:                 1,
+				MaxTime:                 300,
+				Matchers:                []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+				PartialResponseDisabled: true,
+			},
+			expectedSeries: []rawSeries{
+				{
+					lset:   []storepb.Label{{Name: "a", Value: "b"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+			},
+			expectedErr: errors.New("test: failed to receive any data from test: context deadline exceeded"),
+		},
+		{
+			title: "partial response enabled; all stores respond 3s",
+			storeAPIs: []Client{
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{4, 1}, {5, 2}, {6, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("a", "b"), []sample{{7, 1}, {8, 2}, {9, 3}}),
+						},
+						RespDuration: 3 * time.Second,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+				&testClient{
+					StoreClient: &mockedStoreAPI{
+						RespSeries: []*storepb.SeriesResponse{
+							storeSeriesResponse(t, labels.FromStrings("b", "c"), []sample{{1, 1}, {2, 2}, {3, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("b", "c"), []sample{{4, 1}, {5, 2}, {6, 3}}),
+							storeSeriesResponse(t, labels.FromStrings("b", "c"), []sample{{7, 1}, {8, 2}, {9, 3}}),
+						},
+						RespDuration: 3 * time.Second,
+					},
+					labelSets: []storepb.LabelSet{{Labels: []storepb.Label{{Name: "ext", Value: "1"}}}},
+					minTime:   1,
+					maxTime:   300,
+				},
+			},
+			req: &storepb.SeriesRequest{
+				MinTime:  1,
+				MaxTime:  300,
+				Matchers: []storepb.LabelMatcher{{Name: "ext", Value: "1", Type: storepb.LabelMatcher_EQ}},
+			},
+			expectedSeries: []rawSeries{
+				{
+					lset:   []storepb.Label{{Name: "a", Value: "b"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+				{
+					lset:   []storepb.Label{{Name: "b", Value: "c"}},
+					chunks: [][]sample{{{1, 1}, {2, 2}, {3, 3}}},
+				},
+			},
+			expectedWarningsLen: 2,
+		},
 	} {
 		if ok := t.Run(tc.title, func(t *testing.T) {
 			q := NewProxyStore(nil,
@@ -809,7 +887,9 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 				4*time.Second,
 			)
 
-			s := newStoreSeriesServer(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s := newStoreSeriesServer(ctx)
 
 			t0 := time.Now()
 			err := q.Series(tc.req, s)
@@ -825,7 +905,7 @@ func TestProxyStore_SeriesSlowStores(t *testing.T) {
 			seriesEquals(t, tc.expectedSeries, s.SeriesSet)
 			testutil.Equals(t, tc.expectedWarningsLen, len(s.Warnings), "got %v", s.Warnings)
 
-			testutil.Assert(t, elapsedTime < 5*time.Second, fmt.Sprintf("Request has taken %f, expected: <%d, it seems that responseTimeout doesn't work properly.", elapsedTime.Seconds(), 5))
+			testutil.Assert(t, elapsedTime < 5010*time.Millisecond, fmt.Sprintf("Request has taken %f, expected: <%d, it seems that responseTimeout doesn't work properly.", elapsedTime.Seconds(), 5))
 		}); !ok {
 			return
 		}
@@ -1298,7 +1378,7 @@ type StoreSeriesClient struct {
 }
 
 func (c *StoreSeriesClient) Recv() (*storepb.SeriesResponse, error) {
-	if c.respDur != 0 && c.slowSeriesIndex == c.i {
+	if c.respDur != 0 && (c.slowSeriesIndex == c.i || c.slowSeriesIndex == 0) {
 		time.Sleep(c.respDur)
 	}
 

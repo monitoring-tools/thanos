@@ -44,16 +44,17 @@ type Client interface {
 const withPayloadLabel = "with_payload"
 const withoutPayloadLabel = "without_payload"
 
-type firstRecvMetrics struct {
-	withPayload    prometheus.Observer
-	withoutPayload prometheus.Observer
-	timeoutCount   prometheus.Counter
+type storeRequestMetrics struct {
+	withPayload       prometheus.Observer
+	withoutPayload    prometheus.Observer
+	frameTimeoutCount prometheus.Counter
+	queryTimeoutCount prometheus.Counter
 }
 
 type proxyStoreMetrics struct {
-	timeToFirstByte *prometheus.HistogramVec
-	//firstRecvDuration *prometheus.SummaryVec
-	timeoutRecvCount *prometheus.CounterVec
+	timeToFirstByte   *prometheus.HistogramVec
+	frameTimeoutCount *prometheus.CounterVec
+	queryTimeoutCount *prometheus.CounterVec
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -76,15 +77,19 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 		Buckets: []float64{0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120, 240, 360, 720},
 	}, []string{"store", "payload"})
 
-	m.timeoutRecvCount = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "thanos_proxy_timeouted_requests_count",
-		Help: "Timeout recv count.",
+	m.frameTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "thanos_proxy_frame_timeouted_requests_count",
+		Help: "Number of requests with expired store.respone-timeout",
+	}, []string{"store"})
+	m.queryTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "thanos_proxy_frame_timeouted_requests_count",
+		Help: "Number of requests with expired query.timeout",
 	}, []string{"store"})
 
 	if reg != nil {
 		reg.MustRegister(m.timeToFirstByte)
-		//reg.MustRegister(m.firstRecvDuration)
-		reg.MustRegister(m.timeoutRecvCount)
+		reg.MustRegister(m.frameTimeoutCount)
+		reg.MustRegister(m.queryTimeoutCount)
 	}
 
 	return &m
@@ -213,12 +218,7 @@ func newRespCh(ctx context.Context, buffer int) (*ctxRespSender, <-chan *storepb
 }
 
 func (s ctxRespSender) send(r *storepb.SeriesResponse) {
-	select {
-	case <-s.ctx.Done():
-		return
-	case s.ch <- r:
-		return
-	}
+	s.ch <- r
 }
 
 // Series returns all series for a requested time range and label matcher. Requested series are taken from other
@@ -299,17 +299,12 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 				continue
 			}
 
-			metrics := &firstRecvMetrics{
-				withoutPayload: s.metrics.timeToFirstByte.WithLabelValues(st.Addr(), withoutPayloadLabel),
-				withPayload:    s.metrics.timeToFirstByte.WithLabelValues(st.Addr(), withPayloadLabel),
-				timeoutCount:   s.metrics.timeoutRecvCount.WithLabelValues(st.Addr()),
+			metrics := &storeRequestMetrics{
+				withPayload:       s.metrics.timeToFirstByte.WithLabelValues(s.selectorLabels.String(), withPayloadLabel),
+				withoutPayload:    s.metrics.timeToFirstByte.WithLabelValues(s.selectorLabels.String(), withoutPayloadLabel),
+				frameTimeoutCount: s.metrics.frameTimeoutCount.WithLabelValues(s.selectorLabels.String()),
+				queryTimeoutCount: s.metrics.queryTimeoutCount.WithLabelValues(s.selectorLabels.String()),
 			}
-
-			//metrics := &firstRecvMetrics{
-			//	withoutPayload: s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), withoutPayloadLabel),
-			//	withPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), withPayloadLabel),
-			//	timeoutCount:   s.metrics.timeoutRecvCount.WithLabelValues(st.Addr()),
-			//}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
 				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, metrics))
@@ -389,7 +384,7 @@ func startStreamSeriesSet(
 	name string,
 	partialResponse bool,
 	responseTimeout time.Duration,
-	metrics *firstRecvMetrics,
+	metrics *storeRequestMetrics,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -408,10 +403,7 @@ func startStreamSeriesSet(
 		isFirstRecv := true
 		defer wg.Done()
 		defer close(s.recvCh)
-		//rCh := make(chan *recvResponse, 1)
-		//defer close(rCh)
 		for {
-			//var frameTimeoutCtx context.Context
 			frameTimeoutCtx := context.Background()
 			var cancel context.CancelFunc
 			if s.responseTimeout != 0 {
@@ -436,40 +428,12 @@ func startStreamSeriesSet(
 
 			select {
 			case <-ctx.Done():
-				s.closeSeries()
-				//metrics.timeoutCount.Inc()
-				var err error
-				//if s.responseTimeout != 0 {
-				//	err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
-				//} else {
-				err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data from 123 %s", s.name))
-				//}
-				//if s.partialResponse {
-				//	level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
-				//	s.warnCh.send(storepb.NewWarnSeriesResponse(err))
-				//	return
-				//}
-				s.errMtx.Lock()
-				s.err = err
-				s.errMtx.Unlock()
+				metrics.queryTimeoutCount.Inc()
+				s.timeoutHandling(true, ctx)
 				return
 			case <-frameTimeoutCtx.Done():
-				s.closeSeries()
-				metrics.timeoutCount.Inc()
-				var err error
-				//if s.responseTimeout != 0 {
-				err = errors.Wrap(frameTimeoutCtx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
-				//} else {
-				//	err = errors.Wrap(frameTimeoutCtx.Err(), fmt.Sprintf("failed to receive any data from %s", s.name))
-				//}
-				if s.partialResponse {
-					level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
-					s.warnCh.send(storepb.NewWarnSeriesResponse(err))
-					return
-				}
-				s.errMtx.Lock()
-				s.err = err
-				s.errMtx.Unlock()
+				metrics.frameTimeoutCount.Inc()
+				s.timeoutHandling(false, frameTimeoutCtx)
 				return
 			case rr = <-rCh:
 			}
@@ -500,6 +464,24 @@ func startStreamSeriesSet(
 		}
 	}()
 	return s
+}
+
+func (s *streamSeriesSet) timeoutHandling(isQueryTimeout bool, ctx context.Context) {
+	var err error
+	if isQueryTimeout {
+		err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data from %s", s.name))
+	} else {
+		err = errors.Wrap(ctx.Err(), fmt.Sprintf("failed to receive any data in %s from %s", s.responseTimeout.String(), s.name))
+	}
+	s.closeSeries()
+	if s.partialResponse {
+		level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
+		s.warnCh.send(storepb.NewWarnSeriesResponse(err))
+		return
+	}
+	s.errMtx.Lock()
+	s.err = err
+	s.errMtx.Unlock()
 }
 
 // Next blocks until new message is received or stream is closed or operation is timed out.
