@@ -188,6 +188,13 @@ func (s *storeRef) Update(labelSets []storepb.LabelSet, minTime int64, maxTime i
 	s.maxTime = maxTime
 }
 
+func (s *storeRef) StoreType() component.StoreAPI {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	return s.storeType
+}
+
 func (s *storeRef) LabelSets() []storepb.LabelSet {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
