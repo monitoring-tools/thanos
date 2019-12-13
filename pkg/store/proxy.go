@@ -39,6 +39,8 @@ type Client interface {
 	String() string
 	// Addr returns address of a Client.
 	Addr() string
+	LabelSetsString() string
+	StoreType() component.StoreAPI
 }
 
 const withPayloadLabel = "with_payload"
@@ -73,18 +75,18 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 
 	m.timeToFirstByte = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "thanos_proxy_time_to_first_byte_seconds",
-		Help:    "Time it took to sync meta files.",
+		Help:    "Time to get 1st frame from store.",
 		Buckets: []float64{0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120, 240, 360, 720},
-	}, []string{"store", "payload"})
+	}, []string{"external_labels", "store_type", "payload"})
 
 	m.frameTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "thanos_proxy_frame_timeouted_requests_count",
 		Help: "Number of requests with expired store.respone-timeout",
-	}, []string{"store"})
+	}, []string{"external_labels", "store_type"})
 	m.queryTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "thanos_proxy_frame_timeouted_requests_count",
+		Name: "thanos_proxy_query_timeouted_requests_count",
 		Help: "Number of requests with expired query.timeout",
-	}, []string{"store"})
+	}, []string{"external_labels", "store_type"})
 
 	if reg != nil {
 		reg.MustRegister(m.timeToFirstByte)
@@ -300,10 +302,10 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			}
 
 			metrics := &storeRequestMetrics{
-				withPayload:       s.metrics.timeToFirstByte.WithLabelValues(s.selectorLabels.String(), withPayloadLabel),
-				withoutPayload:    s.metrics.timeToFirstByte.WithLabelValues(s.selectorLabels.String(), withoutPayloadLabel),
-				frameTimeoutCount: s.metrics.frameTimeoutCount.WithLabelValues(s.selectorLabels.String()),
-				queryTimeoutCount: s.metrics.queryTimeoutCount.WithLabelValues(s.selectorLabels.String()),
+				withPayload:       s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), st.StoreType().String(), withPayloadLabel),
+				withoutPayload:    s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), st.StoreType().String(), withoutPayloadLabel),
+				frameTimeoutCount: s.metrics.frameTimeoutCount.WithLabelValues(st.LabelSetsString(), st.StoreType().String()),
+				queryTimeoutCount: s.metrics.queryTimeoutCount.WithLabelValues(st.LabelSetsString(), st.StoreType().String()),
 			}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
