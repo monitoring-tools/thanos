@@ -301,11 +301,15 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 				continue
 			}
 
+			var storeTypeStr string
+			if st.StoreType() != nil {
+				storeTypeStr = st.StoreType().String()
+			}
 			metrics := &storeRequestMetrics{
-				withPayload:       s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), st.StoreType().String(), withPayloadLabel),
-				withoutPayload:    s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), st.StoreType().String(), withoutPayloadLabel),
-				frameTimeoutCount: s.metrics.frameTimeoutCount.WithLabelValues(st.LabelSetsString(), st.StoreType().String()),
-				queryTimeoutCount: s.metrics.queryTimeoutCount.WithLabelValues(st.LabelSetsString(), st.StoreType().String()),
+				withPayload:       s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), storeTypeStr, withPayloadLabel),
+				withoutPayload:    s.metrics.timeToFirstByte.WithLabelValues(st.LabelSetsString(), storeTypeStr, withoutPayloadLabel),
+				frameTimeoutCount: s.metrics.frameTimeoutCount.WithLabelValues(st.LabelSetsString(), storeTypeStr),
+				queryTimeoutCount: s.metrics.queryTimeoutCount.WithLabelValues(st.LabelSetsString(), storeTypeStr),
 			}
 
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
