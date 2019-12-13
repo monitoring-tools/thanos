@@ -194,6 +194,10 @@ func (s *storeRef) LabelSets() []storepb.LabelSet {
 	return s.labelSets
 }
 
+func (s *storeRef) LabelSetsString() string {
+	return externalLabelsFromStore(s)
+}
+
 func (s *storeRef) TimeRange() (int64, int64) {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
