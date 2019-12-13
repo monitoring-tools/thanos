@@ -47,6 +47,15 @@ func (c *testClient) String() string {
 func (c *testClient) Addr() string {
 	return "testaddr"
 }
+
+func (c *testClient) LabelSetsString() string {
+	return "test_external_labels"
+}
+
+func (c *testClient) StoreType() component.StoreAPI {
+	return component.Store
+}
+
 func TestProxyStore_Info(t *testing.T) {
 	defer leaktest.CheckTimeout(t, 10*time.Second)()
 
