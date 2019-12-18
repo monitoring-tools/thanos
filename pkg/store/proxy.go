@@ -81,7 +81,7 @@ func newProxyStoreMetrics(reg *prometheus.Registry) *proxyStoreMetrics {
 
 	m.frameTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "thanos_proxy_frame_timeouted_requests_count",
-		Help: "Number of requests with expired store.respone-timeout",
+		Help: "Number of requests with expired store.response-timeout",
 	}, []string{"external_labels", "store_type"})
 	m.queryTimeoutCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "thanos_proxy_query_timeouted_requests_count",
