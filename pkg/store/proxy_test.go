@@ -1345,7 +1345,7 @@ type mockedStoreAPI struct {
 	RespLabelNames  *storepb.LabelNamesResponse
 	RespError       error
 	RespDuration    time.Duration
-	// Index of series in store to slow response
+	// Index of series in store to slow response.
 	SlowSeriesIndex int
 
 	LastSeriesReq      *storepb.SeriesRequest
