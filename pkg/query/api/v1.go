@@ -502,8 +502,11 @@ func (api *API) series(r *http.Request) (interface{}, []error, *ApiError) {
 		return nil, nil, apiErr
 	}
 
-	// TODO(bwplotka): Support downsampling?
-	q, err := api.queryableCreate(enableDedup, replicaLabels, 0, enablePartialResponse, true).
+	maxSourceResolution, apiErr := api.parseDownsamplingParamMillis(r, api.defaultInstantQueryMaxSourceResolution)
+	if apiErr != nil {
+		return nil, nil, apiErr
+	}
+	q, err := api.queryableCreate(enableDedup, replicaLabels, maxSourceResolution, enablePartialResponse, true).
 		Querier(r.Context(), timestamp.FromTime(start), timestamp.FromTime(end))
 	if err != nil {
 		return nil, nil, &ApiError{errorExec, err}
