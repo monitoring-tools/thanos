@@ -26,6 +26,7 @@ We use *breaking* word for marking changes that are not backward compatible (rel
 ### Changed
 
 - [#1933](https://github.com/thanos-io/thanos/pull/1933) Add a flag `--tsdb.wal-compression` to configure whether to enable tsdb wal compression in ruler and receiver.
+- [#2003](https://github.com/thanos-io/thanos/pull/2003) A flag `--instantDefaultMaxSourceResolution` also used for /series APi method.
 
 ## [v0.10.0](https://github.com/thanos-io/thanos/releases/tag/v0.10.0) - 2020.01.13
 
