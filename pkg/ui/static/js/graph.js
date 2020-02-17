@@ -94,7 +94,6 @@ Prometheus.Graph.prototype.initialize = function() {
   self.rangeInput = self.queryForm.find("input[name=range_input]");
   self.stackedBtn = self.queryForm.find(".stacked_btn");
   self.stacked = self.queryForm.find("input[name=stacked]");
-  self.insertMetric = self.queryForm.find("select[name=insert_metric]");
   self.refreshInterval = self.queryForm.find("select[name=refresh]");
   self.maxSourceResolutionInput = self.queryForm.find("select[name=max_source_resolution_input]");
 
@@ -112,13 +111,6 @@ Prometheus.Graph.prototype.initialize = function() {
       self.submitQuery();
     }
   });
-
-  // Return moves focus back to expr instead of submitting.
-  self.insertMetric.bind("keydown", "return", function(e) {
-    self.expr.focus();
-    self.expr.val(self.expr.val());
-    return e.preventDefault();
-  })
 
   self.error = graphWrapper.find(".error").hide();
   self.warning = graphWrapper.find(".warning").hide();
@@ -272,11 +264,6 @@ Prometheus.Graph.prototype.initialize = function() {
   self.queryForm.find("button[name=inc_moment]").click(function() { self.increaseMoment(); });
   self.queryForm.find("button[name=dec_moment]").click(function() { self.decreaseMoment(); });
 
-  self.insertMetric.change(function() {
-    self.expr.selection("replace", {text: self.insertMetric.val(), mode: "before"});
-    self.expr.focus(); // refocusing
-  });
-
   var removeBtn = graphWrapper.find("[name=remove]");
   removeBtn.click(function() {
     self.remove();
@@ -336,10 +323,7 @@ Prometheus.Graph.prototype.populateInsertableMetrics = function() {
           return;
         }
 
-        pageConfig.allMetrics = json.data; // todo: do we need self.allMetrics? Or can it just live on the page
-        for (var i = 0; i < pageConfig.allMetrics.length; i++) {
-          self.insertMetric[0].options.add(new Option(pageConfig.allMetrics[i], pageConfig.allMetrics[i]));
-        }
+        pageConfig.allMetrics = json.data;
 
         self.fuzzyResult = {
           query: null,
