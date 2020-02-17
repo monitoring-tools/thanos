@@ -11,9 +11,6 @@
             </div>
             <div class="form-inline">
               <input class="btn btn-primary execute_btn" type="submit" value="Execute" name="submit">
-              <select class="custom-select form-control expression_select" name="insert_metric">
-                <option value="">- insert metric at cursor -</option>
-              </select>
               <button type="button" class="btn btn-default graph_opt_btn dedup_btn">
               <i class="glyphicon"></i> deduplication
               </button>
