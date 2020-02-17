@@ -126,10 +126,6 @@ input[title]:hover:after {
   font-size: 0.8em;
 }
 
-select[name="insert_metric"] {
-  margin-bottom: 0px;
-}
-
 select[name="max_source_res_input"] {
   height: 29px;
   padding: 6px 12px;
@@ -210,11 +206,6 @@ input[name="end_input"], input[name="range_input"] {
 .expression_input {
   width: 100% !important;
   margin-bottom: 10px;
-}
-
-.expression_select {
-  width: 220px !important;
-  margin-left: 7px;
 }
 
 .graph_container .rickshaw_legend {
