@@ -359,6 +359,7 @@ Prometheus.Graph.prototype.populateInsertableMetrics = function() {
   });
 };
 
+const underscore = '_'.charCodeAt(0);
 const QUERY_MIN_LENGTH = 3;
 const AMOUNT_OF_ITEMS_IN_SUGGEST = (
   window.screen.availHeight > 900 // MacBook Pro 13-inch
@@ -396,11 +397,13 @@ function createMatcher(opts) {
           result = str.split('')
         }
 
+        const weight = str.charCodeAt(idx - 1) === underscore ? 10 : 1;
+
         result[idx] = pre + str[idx] + post;
         patternIdx += 1;
 
         // consecutive characters should increase the score more than linearly
-        currScore += 1 + currScore;
+        currScore += weight + currScore;
       } else {
         currScore = 0;
       }
