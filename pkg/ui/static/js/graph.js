@@ -45,7 +45,7 @@ Prometheus.Graph.prototype.initialize = function() {
     self.options.tab = 1;
   }
   if (self.options.max_source_resolution === undefined) {
-	  self.options.max_source_resolution = "0s";
+	  self.options.max_source_resolution = "auto";
   }
 
   // Draw graph controls and container from Handlebars template.
