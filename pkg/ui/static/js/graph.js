@@ -337,8 +337,12 @@ Prometheus.Graph.prototype.populateInsertableMetrics = function() {
         }
 
         pageConfig.allMetrics = json.data; // todo: do we need self.allMetrics? Or can it just live on the page
-        for (var i = 0; i < pageConfig.allMetrics.length; i++) {
-          self.insertMetric[0].options.add(new Option(pageConfig.allMetrics[i], pageConfig.allMetrics[i]));
+
+        if (pageConfig.allMetrics.length < 101) {
+          for (var i = 0; i < pageConfig.allMetrics.length; i++) {
+            self.insertMetric[0].options.add(new Option(pageConfig.allMetrics[i], pageConfig.allMetrics[i]));
+          }
+          self.insertMetric[0].style.display = "";
         }
 
         self.fuzzyResult = {
