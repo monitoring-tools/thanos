@@ -2,7 +2,7 @@
           <form class="query_form">
             <div class="form-row">
               <div class="col-lg-10">
-                <textarea rows="1" placeholder="Expression (press Shift+Enter for newlines)" name="expr" id="expr{{id}}" class="form-control expression_input" data-provide="typeahead" autocomplete="off" spellcheck="false">{{expr}}</textarea>
+                <textarea rows="1" placeholder="Expression (press Shift+Enter for newlines)" name="expr" id="expr{{id}}" class="form-control expression_input" autocomplete="off" spellcheck="false">{{expr}}</textarea>
               </div>
               <div class="col-lg-2">
                 <div class="eval_stats float-right"></div>
@@ -11,7 +11,7 @@
             </div>
             <div class="form-inline">
               <input class="btn btn-primary execute_btn" type="submit" value="Execute" name="submit">
-              <select class="custom-select form-control expression_select" name="insert_metric">
+              <select class="custom-select form-control expression_select" name="insert_metric" style="display: none">
                 <option value="">- insert metric at cursor -</option>
               </select>
               <button type="button" class="btn btn-default graph_opt_btn dedup_btn">
