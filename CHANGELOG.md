@@ -28,6 +28,7 @@ We use *breaking* word for marking changes that are not backward compatible (rel
 - [#2030](https://github.com/thanos-io/thanos/pull/2030) Query: Add `thanos_proxy_store_empty_stream_responses_total` metric for number of empty responses from stores.
 - [#2049](https://github.com/thanos-io/thanos/pull/2049) Tracing: Support sampling on Elastic APM with new sample_rate setting.
 - [#2008](https://github.com/thanos-io/thanos/pull/2008) Querier, Receiver, Sidecar, Store: Add gRPC [health check](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) endpoints.
+- [#2145](https://github.com/thanos-io/thanos/pull/2145) Tracing: track query sent to prometheus via remote read api.
 
 ### Changed
 
@@ -40,6 +41,7 @@ We use *breaking* word for marking changes that are not backward compatible (rel
 
 - [#2015](https://github.com/thanos-io/thanos/pull/2015) Sidecar: Querier /api/v1/series bug fixed when time range was ignored inside sidecar.
 The bug was noticeable for example when using Grafana template variables.
+- [#2120](https://github.com/thanos-io/thanos/pull/2120) Bucket Web: Set state of status prober properly.
 
 ## [v0.10.0](https://github.com/thanos-io/thanos/releases/tag/v0.10.0) - 2020.01.13
 
