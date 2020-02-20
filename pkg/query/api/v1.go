@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -116,6 +117,7 @@ type API struct {
 
 type queryAPIMetrics struct {
 	requestTimeRange prometheus.Histogram
+	responseDurationByTimeRanges *prometheus.HistogramVec
 }
 
 func newQueryAPIMetrics(reg prometheus.Registerer) *queryAPIMetrics {
@@ -125,13 +127,23 @@ func newQueryAPIMetrics(reg prometheus.Registerer) *queryAPIMetrics {
 		prometheus.HistogramOpts{
 			Name:    "thanos_query_api_request_timerange_seconds",
 			Help:    "Requested timeranges(seconds).",
-			Buckets: prometheus.ExponentialBuckets(3600, 2, 10),
+			Buckets: prometheus.ExponentialBuckets(3600, 2, 12),
 		},
+	)
+
+	m.responseDurationByTimeRanges = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "thanos_query_api_response_duration_by_timerange_seconds",
+			Help:    "Requested timeranges(seconds).",
+			Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
+		},
+		[]string{"time_range"},
 	)
 
 	if reg != nil {
 		reg.MustRegister(
 			m.requestTimeRange,
+			m.responseDurationByTimeRanges,
 		)
 	}
 	return &m
@@ -172,15 +184,17 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 		hf := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			SetCORS(w)
 
-
+			var timerange float64
 			start, err := parseTime(r.FormValue("start"))
 			if err == nil {
 				end, err := parseTime(r.FormValue("end"))
 				if err == nil {
-					api.metrics.requestTimeRange.Observe(end.Sub(start).Seconds())
+					timerange = end.Sub(start).Seconds()
+					api.metrics.requestTimeRange.Observe(timerange)
 				}
 			}
 
+			start = time.Now()
 			if data, warnings, err := f(r); err != nil {
 				RespondError(w, err, data)
 			} else if data != nil {
@@ -188,6 +202,10 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 			} else {
 				w.WriteHeader(http.StatusNoContent)
 			}
+			elapsedTime := time.Now().Sub(start)
+			b := prometheus.ExponentialBuckets(3600, 2, 12)
+			neededBucket := sort.SearchFloat64s(b, timerange)
+			api.metrics.responseDurationByTimeRanges.WithLabelValues(fmt.Sprintf("%e", b[neededBucket])).Observe(elapsedTime.Seconds())
 		})
 		return ins.NewHandler(name, tracing.HTTPMiddleware(tracer, name, logger, gziphandler.GzipHandler(hf)))
 	}
