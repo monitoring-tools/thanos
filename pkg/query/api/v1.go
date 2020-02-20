@@ -110,6 +110,31 @@ type API struct {
 	defaultInstantQueryMaxSourceResolution time.Duration
 
 	now func() time.Time
+
+	metrics *queryAPIMetrics
+}
+
+type queryAPIMetrics struct {
+	requestTimeRange prometheus.Histogram
+}
+
+func newQueryAPIMetrics(reg prometheus.Registerer) *queryAPIMetrics {
+	var m queryAPIMetrics
+
+	m.requestTimeRange = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "thanos_query_api_request_timerange_seconds",
+			Help:    "Requested timeranges(seconds).",
+			Buckets: prometheus.ExponentialBuckets(3600, 2, 10),
+		},
+	)
+
+	if reg != nil {
+		reg.MustRegister(
+			m.requestTimeRange,
+		)
+	}
+	return &m
 }
 
 // NewAPI returns an initialized API type.
@@ -123,6 +148,9 @@ func NewAPI(
 	replicaLabels []string,
 	defaultInstantQueryMaxSourceResolution time.Duration,
 ) *API {
+
+	metrics := newQueryAPIMetrics(reg)
+
 	return &API{
 		logger:                                 logger,
 		queryEngine:                            qe,
@@ -133,7 +161,8 @@ func NewAPI(
 		reg:                                    reg,
 		defaultInstantQueryMaxSourceResolution: defaultInstantQueryMaxSourceResolution,
 
-		now: time.Now,
+		now:     time.Now,
+		metrics: metrics,
 	}
 }
 
@@ -142,6 +171,16 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 	instr := func(name string, f ApiFunc) http.HandlerFunc {
 		hf := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			SetCORS(w)
+
+
+			start, err := parseTime(r.FormValue("start"))
+			if err == nil {
+				end, err := parseTime(r.FormValue("end"))
+				if err == nil {
+					api.metrics.requestTimeRange.Observe(end.Sub(start).Seconds())
+				}
+			}
+
 			if data, warnings, err := f(r); err != nil {
 				RespondError(w, err, data)
 			} else if data != nil {
