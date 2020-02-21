@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -38,6 +37,7 @@ import (
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/timestamp"
+	ptime "github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
 	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
@@ -204,8 +204,23 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 			}
 			elapsedTime := time.Now().Sub(start)
 			b := prometheus.ExponentialBuckets(3600, 2, 12)
-			neededBucket := sort.SearchFloat64s(b, timerange)
-			api.metrics.responseDurationByTimeRanges.WithLabelValues(fmt.Sprintf("%e", b[neededBucket])).Observe(elapsedTime.Seconds())
+
+			label := "0h"
+			if timerange > 0 {
+				for i, v := range b {
+					if timerange <= v {
+						d, _ := ptime.ParseDuration(fmt.Sprintf("%.0fs", v))
+						label = d.String()
+						break
+					} else {
+						if i == (len(b)-1) {
+							label = "+Inf"
+						}
+					}
+				}
+			}
+
+			api.metrics.responseDurationByTimeRanges.WithLabelValues(label).Observe(elapsedTime.Seconds())
 		})
 		return ins.NewHandler(name, tracing.HTTPMiddleware(tracer, name, logger, gziphandler.GzipHandler(hf)))
 	}
