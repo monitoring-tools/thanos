@@ -6,7 +6,6 @@ package block
 import (
 	"context"
 	"encoding/json"
-	stderrors "errors"
 	"io/ioutil"
 	"os"
 	"path"
@@ -51,7 +50,7 @@ const (
 	// Filter's label values.
 	labelExcludedMeta = "label-excluded"
 	timeExcludedMeta  = "time-excluded"
-	TooFreshMeta      = "too-fresh"
+	tooFreshMeta      = "too-fresh"
 	duplicateMeta     = "duplicate"
 )
 
@@ -83,7 +82,7 @@ func newSyncMetrics(r prometheus.Registerer) *syncMetrics {
 		[]string{corruptedMeta},
 		[]string{noMeta},
 		[]string{loadedMeta},
-		[]string{TooFreshMeta},
+		[]string{tooFreshMeta},
 		[]string{failedMeta},
 		[]string{labelExcludedMeta},
 		[]string{timeExcludedMeta},
@@ -185,7 +184,7 @@ func (s *MetaFetcher) loadMeta(ctx context.Context, id ulid.ULID) (*metadata.Met
 			return m, nil
 		}
 
-		if !stderrors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, os.ErrNotExist) {
 			level.Warn(s.logger).Log("msg", "best effort read of the local meta.json failed; removing cached block dir", "dir", cachedBlockDir, "err", err)
 			if err := os.RemoveAll(cachedBlockDir); err != nil {
 				level.Warn(s.logger).Log("msg", "best effort remove of cached dir failed; ignoring", "dir", cachedBlockDir, "err", err)
@@ -535,6 +534,9 @@ type ConsistencyDelayMetaFilter struct {
 
 // NewConsistencyDelayMetaFilter creates ConsistencyDelayMetaFilter.
 func NewConsistencyDelayMetaFilter(logger log.Logger, consistencyDelay time.Duration, reg prometheus.Registerer) *ConsistencyDelayMetaFilter {
+	if logger == nil {
+		logger = log.NewNopLogger()
+	}
 	consistencyDelayMetric := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "consistency_delay_seconds",
 		Help: "Configured consistency delay in seconds.",
@@ -561,7 +563,7 @@ func (f *ConsistencyDelayMetaFilter) Filter(metas map[ulid.ULID]*metadata.Meta, 
 			meta.Thanos.Source != metadata.CompactorRepairSource {
 
 			level.Debug(f.logger).Log("msg", "block is too fresh for now", "block", id)
-			synced.WithLabelValues(TooFreshMeta).Inc()
+			synced.WithLabelValues(tooFreshMeta).Inc()
 			delete(metas, id)
 		}
 	}
