@@ -638,6 +638,7 @@ func (s *bucketSeriesSet) Err() error {
 }
 
 func blockSeries(
+	ctx context.Context,
 	extLset map[string]string,
 	indexr *bucketIndexReader,
 	chunkr *bucketChunkReader,
@@ -647,8 +648,6 @@ func blockSeries(
 ) (storepb.SeriesSet, *queryStats, error) {
 	span, ctx := tracing.StartSpan(ctx, "blockSeries")
 	defer span.Finish()
-
-	span.SetTag("ulid", ulid)
 
 	ps, err := indexr.ExpandedPostings(matchers)
 	if err != nil {
@@ -933,6 +932,7 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 
 			g.Go(func() error {
 				part, pstats, err := blockSeries(
+					ctx,
 					b.meta.Thanos.Labels,
 					indexr,
 					chunkr,
