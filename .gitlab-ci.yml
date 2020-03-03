@@ -1,0 +1,32 @@
+stages:
+  - build
+  - push
+
+variables:
+  CONTAINER_CURRENT_IMAGE: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_NAME}
+
+compile:
+  image: golang:1.13.8
+  stage: build
+  before_script:
+    - echo $CI_COMMIT_REF_NAME-$CI_COMMIT_SHA
+    - git config --global credential.helper store && echo "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.ozon.ru" >> ~/.git-credentials
+  script:
+    - make build
+  artifacts:
+    paths:
+      - thanos
+    expire_in: 20 minutes
+
+
+push-image:
+  stage: push
+  allow_failure: false
+  image: docker:stable
+  before_script:
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+  after_script:
+    - docker logout $CI_REGISTRY
+  script:
+    - docker build -t $CONTAINER_CURRENT_IMAGE .
+    - docker push $CONTAINER_CURRENT_IMAGE
