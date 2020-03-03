@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 // Copyright 2016 The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -502,8 +505,7 @@ func (api *API) series(r *http.Request) (interface{}, []error, *ApiError) {
 		return nil, nil, apiErr
 	}
 
-	// TODO(bwplotka): Support downsampling?
-	q, err := api.queryableCreate(enableDedup, replicaLabels, 0, enablePartialResponse, true).
+	q, err := api.queryableCreate(enableDedup, replicaLabels, math.MaxInt64, enablePartialResponse, true).
 		Querier(r.Context(), timestamp.FromTime(start), timestamp.FromTime(end))
 	if err != nil {
 		return nil, nil, &ApiError{errorExec, err}
@@ -536,6 +538,9 @@ func (api *API) series(r *http.Request) (interface{}, []error, *ApiError) {
 
 func Respond(w http.ResponseWriter, data interface{}, warnings []error) {
 	w.Header().Set("Content-Type", "application/json")
+	if len(warnings) > 0 {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.WriteHeader(http.StatusOK)
 
 	resp := &response{
@@ -550,6 +555,7 @@ func Respond(w http.ResponseWriter, data interface{}, warnings []error) {
 
 func RespondError(w http.ResponseWriter, apiErr *ApiError, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 
 	var code int
 	switch apiErr.Typ {

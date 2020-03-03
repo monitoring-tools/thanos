@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package store
 
 import (
@@ -23,6 +26,7 @@ import (
 	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 )
 
 var (
@@ -97,9 +101,9 @@ func prepareTestBlocks(t testing.TB, now time.Time, count int, dir string, bkt o
 
 		// Create two blocks per time slot. Only add 10 samples each so only one chunk
 		// gets created each. This way we can easily verify we got 10 chunks per series below.
-		id1, err := testutil.CreateBlock(ctx, dir, series[:4], 10, mint, maxt, extLset, 0)
+		id1, err := e2eutil.CreateBlock(ctx, dir, series[:4], 10, mint, maxt, extLset, 0)
 		testutil.Ok(t, err)
-		id2, err := testutil.CreateBlock(ctx, dir, series[4:], 10, mint, maxt, extLset, 0)
+		id2, err := e2eutil.CreateBlock(ctx, dir, series[4:], 10, mint, maxt, extLset, 0)
 		testutil.Ok(t, err)
 
 		dir1, dir2 := filepath.Join(dir, id1.String()), filepath.Join(dir, id2.String())
@@ -163,6 +167,7 @@ func prepareStoreWithTestBlocks(t testing.TB, dir string, bkt objstore.Bucket, m
 		20,
 		filterConf,
 		true,
+		true,
 	)
 	testutil.Ok(t, err)
 	s.store = store
@@ -178,7 +183,8 @@ func prepareStoreWithTestBlocks(t testing.TB, dir string, bkt objstore.Bucket, m
 	return s
 }
 
-func testBucketStore_e2e(t testing.TB, ctx context.Context, s *storeSuite) {
+// TODO(bwplotka): Benchmark Series.
+func testBucketStore_e2e(t *testing.T, ctx context.Context, s *storeSuite) {
 	mint, maxt := s.store.TimeRange()
 	testutil.Equals(t, s.minTime, mint)
 	testutil.Equals(t, s.maxTime, maxt)
@@ -392,16 +398,18 @@ func testBucketStore_e2e(t testing.TB, ctx context.Context, s *storeSuite) {
 			},
 		},
 	} {
-		t.Log("Run ", i)
+		if ok := t.Run(fmt.Sprint(i), func(t *testing.T) {
+			srv := newStoreSeriesServer(ctx)
 
-		srv := newStoreSeriesServer(ctx)
+			testutil.Ok(t, s.store.Series(tcase.req, srv))
+			testutil.Equals(t, len(tcase.expected), len(srv.SeriesSet))
 
-		testutil.Ok(t, s.store.Series(tcase.req, srv))
-		testutil.Equals(t, len(tcase.expected), len(srv.SeriesSet))
-
-		for i, s := range srv.SeriesSet {
-			testutil.Equals(t, tcase.expected[i], s.Labels)
-			testutil.Equals(t, tcase.expectedChunkLen, len(s.Chunks))
+			for i, s := range srv.SeriesSet {
+				testutil.Equals(t, tcase.expected[i], s.Labels)
+				testutil.Equals(t, tcase.expectedChunkLen, len(s.Chunks))
+			}
+		}); !ok {
+			return
 		}
 	}
 }
@@ -417,27 +425,36 @@ func TestBucketStore_e2e(t *testing.T) {
 
 		s := prepareStoreWithTestBlocks(t, dir, bkt, false, 0, emptyRelabelConfig, allowAllFilterConf)
 
-		t.Log("Test with no index cache")
-		s.cache.SwapWith(noopCache{})
-		testBucketStore_e2e(t, ctx, s)
+		if ok := t.Run("no index cache", func(t *testing.T) {
+			s.cache.SwapWith(noopCache{})
+			testBucketStore_e2e(t, ctx, s)
+		}); !ok {
+			return
+		}
 
-		t.Log("Test with large, sufficient index cache")
-		indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(s.logger, nil, storecache.InMemoryIndexCacheConfig{
-			MaxItemSize: 1e5,
-			MaxSize:     2e5,
-		})
-		testutil.Ok(t, err)
-		s.cache.SwapWith(indexCache)
-		testBucketStore_e2e(t, ctx, s)
+		if ok := t.Run("with large, sufficient index cache", func(t *testing.T) {
+			indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(s.logger, nil, storecache.InMemoryIndexCacheConfig{
+				MaxItemSize: 1e5,
+				MaxSize:     2e5,
+			})
+			testutil.Ok(t, err)
+			s.cache.SwapWith(indexCache)
+			testBucketStore_e2e(t, ctx, s)
+		}); !ok {
+			return
+		}
 
-		t.Log("Test with small index cache")
-		indexCache2, err := storecache.NewInMemoryIndexCacheWithConfig(s.logger, nil, storecache.InMemoryIndexCacheConfig{
-			MaxItemSize: 50,
-			MaxSize:     100,
-		})
-		testutil.Ok(t, err)
-		s.cache.SwapWith(indexCache2)
-		testBucketStore_e2e(t, ctx, s)
+		if ok := t.Run("with small index cache", func(t *testing.T) {
+			indexCache2, err := storecache.NewInMemoryIndexCacheWithConfig(s.logger, nil, storecache.InMemoryIndexCacheConfig{
+				MaxItemSize: 50,
+				MaxSize:     100,
+			})
+			testutil.Ok(t, err)
+			s.cache.SwapWith(indexCache2)
+			testBucketStore_e2e(t, ctx, s)
+		}); !ok {
+			return
+		}
 	})
 }
 
@@ -520,7 +537,6 @@ func TestBucketStore_TimePartitioning_e2e(t *testing.T) {
 	testutil.Equals(t, len(expectedLabels), len(srv.SeriesSet))
 
 	for i, s := range srv.SeriesSet {
-		fmt.Println(s.Labels)
 		testutil.Equals(t, expectedLabels[i], s.Labels)
 
 		// prepareTestBlocks makes 3 chunks containing 2 hour data,

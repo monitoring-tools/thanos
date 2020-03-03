@@ -1,8 +1,10 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package block
 
 import (
 	"context"
-	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -12,10 +14,10 @@ import (
 
 	"github.com/fortytw2/leaktest"
 	"github.com/go-kit/kit/log"
-	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/thanos-io/thanos/pkg/objstore/inmem"
 	"github.com/thanos-io/thanos/pkg/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 
 	"github.com/oklog/ulid"
 )
@@ -76,7 +78,7 @@ func TestUpload(t *testing.T) {
 	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
 
 	bkt := inmem.NewBucket()
-	b1, err := testutil.CreateBlock(ctx, tmpDir, []labels.Labels{
+	b1, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
 		{{Name: "a", Value: "1"}},
 		{{Name: "a", Value: "2"}},
 		{{Name: "a", Value: "3"}},
@@ -104,7 +106,7 @@ func TestUpload(t *testing.T) {
 		testutil.NotOk(t, err)
 		testutil.Assert(t, strings.HasSuffix(err.Error(), "/meta.json: no such file or directory"), "")
 	}
-	testutil.Ok(t, cpy(path.Join(tmpDir, b1.String(), MetaFilename), path.Join(tmpDir, "test", b1.String(), MetaFilename)))
+	e2eutil.Copy(t, path.Join(tmpDir, b1.String(), MetaFilename), path.Join(tmpDir, "test", b1.String(), MetaFilename))
 	{
 		// Missing chunks.
 		err := Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, "test", b1.String()))
@@ -115,7 +117,7 @@ func TestUpload(t *testing.T) {
 		testutil.Equals(t, 1, len(bkt.Objects()))
 	}
 	testutil.Ok(t, os.MkdirAll(path.Join(tmpDir, "test", b1.String(), ChunksDirname), os.ModePerm))
-	testutil.Ok(t, cpy(path.Join(tmpDir, b1.String(), ChunksDirname, "000001"), path.Join(tmpDir, "test", b1.String(), ChunksDirname, "000001")))
+	e2eutil.Copy(t, path.Join(tmpDir, b1.String(), ChunksDirname, "000001"), path.Join(tmpDir, "test", b1.String(), ChunksDirname, "000001"))
 	{
 		// Missing index file.
 		err := Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, "test", b1.String()))
@@ -125,7 +127,7 @@ func TestUpload(t *testing.T) {
 		// Only debug meta.json present.
 		testutil.Equals(t, 1, len(bkt.Objects()))
 	}
-	testutil.Ok(t, cpy(path.Join(tmpDir, b1.String(), IndexFilename), path.Join(tmpDir, "test", b1.String(), IndexFilename)))
+	e2eutil.Copy(t, path.Join(tmpDir, b1.String(), IndexFilename), path.Join(tmpDir, "test", b1.String(), IndexFilename))
 	testutil.Ok(t, os.Remove(path.Join(tmpDir, "test", b1.String(), MetaFilename)))
 	{
 		// Missing meta.json file.
@@ -136,7 +138,7 @@ func TestUpload(t *testing.T) {
 		// Only debug meta.json present.
 		testutil.Equals(t, 1, len(bkt.Objects()))
 	}
-	testutil.Ok(t, cpy(path.Join(tmpDir, b1.String(), MetaFilename), path.Join(tmpDir, "test", b1.String(), MetaFilename)))
+	e2eutil.Copy(t, path.Join(tmpDir, b1.String(), MetaFilename), path.Join(tmpDir, "test", b1.String(), MetaFilename))
 	{
 		// Full block.
 		testutil.Ok(t, Upload(ctx, log.NewNopLogger(), bkt, path.Join(tmpDir, "test", b1.String())))
@@ -155,7 +157,7 @@ func TestUpload(t *testing.T) {
 	}
 	{
 		// Upload with no external labels should be blocked.
-		b2, err := testutil.CreateBlock(ctx, tmpDir, []labels.Labels{
+		b2, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
 			{{Name: "a", Value: "1"}},
 			{{Name: "a", Value: "2"}},
 			{{Name: "a", Value: "3"}},
@@ -170,31 +172,6 @@ func TestUpload(t *testing.T) {
 	}
 }
 
-func cpy(src, dst string) error {
-	sourceFileStat, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-
-	if !sourceFileStat.Mode().IsRegular() {
-		return errors.Errorf("%s is not a regular file", src)
-	}
-
-	source, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	destination, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destination.Close()
-	_, err = io.Copy(destination, source)
-	return err
-}
-
 func TestDelete(t *testing.T) {
 	defer leaktest.CheckTimeout(t, 10*time.Second)()
 
@@ -206,7 +183,7 @@ func TestDelete(t *testing.T) {
 
 	bkt := inmem.NewBucket()
 	{
-		b1, err := testutil.CreateBlock(ctx, tmpDir, []labels.Labels{
+		b1, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
 			{{Name: "a", Value: "1"}},
 			{{Name: "a", Value: "2"}},
 			{{Name: "a", Value: "3"}},
@@ -223,7 +200,7 @@ func TestDelete(t *testing.T) {
 		testutil.Equals(t, 1, len(bkt.Objects()))
 	}
 	{
-		b2, err := testutil.CreateBlock(ctx, tmpDir, []labels.Labels{
+		b2, err := e2eutil.CreateBlock(ctx, tmpDir, []labels.Labels{
 			{{Name: "a", Value: "1"}},
 			{{Name: "a", Value: "2"}},
 			{{Name: "a", Value: "3"}},

@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package main
 
 import (
@@ -13,7 +16,6 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/oklog/run"
-	"github.com/oklog/ulid"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -96,9 +98,9 @@ func registerCompact(m map[string]setupFunc, app *kingpin.Application) {
 	consistencyDelay := modelDuration(cmd.Flag("consistency-delay", fmt.Sprintf("Minimum age of fresh (non-compacted) blocks before they are being processed. Malformed blocks older than the maximum of consistency-delay and %v will be removed.", compact.PartialUploadThresholdAge)).
 		Default("30m"))
 
-	retentionRaw := modelDuration(cmd.Flag("retention.resolution-raw", "How long to retain raw samples in bucket. 0d - disables this retention").Default("0d"))
-	retention5m := modelDuration(cmd.Flag("retention.resolution-5m", "How long to retain samples of resolution 1 (5 minutes) in bucket. 0d - disables this retention").Default("0d"))
-	retention1h := modelDuration(cmd.Flag("retention.resolution-1h", "How long to retain samples of resolution 2 (1 hour) in bucket. 0d - disables this retention").Default("0d"))
+	retentionRaw := modelDuration(cmd.Flag("retention.resolution-raw", "How long to retain raw samples in bucket. Setting this to 0d will retain samples of this resolution forever").Default("0d"))
+	retention5m := modelDuration(cmd.Flag("retention.resolution-5m", "How long to retain samples of resolution 1 (5 minutes) in bucket. Setting this to 0d will retain samples of this resolution forever").Default("0d"))
+	retention1h := modelDuration(cmd.Flag("retention.resolution-1h", "How long to retain samples of resolution 2 (1 hour) in bucket. Setting this to 0d will retain samples of this resolution forever").Default("0d"))
 
 	wait := cmd.Flag("wait", "Do not exit after all compactions have been processed and wait for new work.").
 		Short('w').Bool()
@@ -121,7 +123,7 @@ func registerCompact(m map[string]setupFunc, app *kingpin.Application) {
 
 	selectorRelabelConf := regSelectorRelabelFlags(cmd)
 
-	m[component.Compact.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ bool) error {
+	m[component.Compact.String()] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ <-chan struct{}, _ bool) error {
 		return runCompact(g, logger, reg,
 			*httpAddr,
 			time.Duration(*httpGracePeriod),
@@ -181,23 +183,21 @@ func runCompact(
 		Name: "thanos_compactor_iterations_total",
 		Help: "Total number of iterations that were executed successfully.",
 	})
-	consistencyDelayMetric := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "thanos_consistency_delay_seconds",
-		Help: "Configured consistency delay in seconds.",
-	}, func() float64 {
-		return consistencyDelay.Seconds()
-	})
 	partialUploadDeleteAttempts := prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "thanos_compactor_aborted_partial_uploads_deletion_attempts_total",
 		Help: "Total number of started deletions of blocks that are assumed aborted and only partially uploaded.",
 	})
-	reg.MustRegister(halted, retried, iterations, consistencyDelayMetric, partialUploadDeleteAttempts)
+	reg.MustRegister(halted, retried, iterations, partialUploadDeleteAttempts)
 
 	downsampleMetrics := newDownsampleMetrics(reg)
 
-	statusProber := prober.New(component, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg))
-	// Initiate HTTP listener providing metrics endpoint and readiness/liveness probes.
-	srv := httpserver.New(logger, reg, component, statusProber,
+	httpProbe := prober.NewHTTP()
+	statusProber := prober.Combine(
+		httpProbe,
+		prober.NewInstrumentation(component, logger, prometheus.WrapRegistererWithPrefix("thanos_", reg)),
+	)
+
+	srv := httpserver.New(logger, reg, component, httpProbe,
 		httpserver.WithListen(httpBindAddr),
 		httpserver.WithGracePeriod(httpGracePeriod),
 	)
@@ -240,15 +240,18 @@ func runCompact(
 		}
 	}()
 
-	metaFetcher, err := block.NewMetaFetcher(logger, 32, bkt, "", extprom.WrapRegistererWithPrefix("thanos_", reg),
+	duplicateBlocksFilter := block.NewDeduplicateFilter()
+	prometheusRegisterer := extprom.WrapRegistererWithPrefix("thanos_", reg)
+	metaFetcher, err := block.NewMetaFetcher(logger, 32, bkt, "", prometheusRegisterer,
 		block.NewLabelShardedMetaFilter(relabelConfig).Filter,
-		(&consistencyDelayMetaFilter{logger: logger, consistencyDelay: consistencyDelay}).Filter,
+		block.NewConsistencyDelayMetaFilter(logger, consistencyDelay, prometheusRegisterer).Filter,
+		duplicateBlocksFilter.Filter,
 	)
 	if err != nil {
 		return errors.Wrap(err, "create meta fetcher")
 	}
 
-	sy, err := compact.NewSyncer(logger, reg, bkt, metaFetcher, blockSyncConcurrency, acceptMalformedIndex, false)
+	sy, err := compact.NewSyncer(logger, reg, bkt, metaFetcher, duplicateBlocksFilter, blockSyncConcurrency, acceptMalformedIndex, false)
 	if err != nil {
 		return errors.Wrap(err, "create syncer")
 	}
@@ -383,25 +386,6 @@ func runCompact(
 	level.Info(logger).Log("msg", "starting compact node")
 	statusProber.Ready()
 	return nil
-}
-
-type consistencyDelayMetaFilter struct {
-	logger           log.Logger
-	consistencyDelay time.Duration
-}
-
-func (f *consistencyDelayMetaFilter) Filter(metas map[ulid.ULID]*metadata.Meta, synced block.GaugeLabeled, _ bool) {
-	for id, meta := range metas {
-		if ulid.Now()-id.Time() < uint64(f.consistencyDelay/time.Millisecond) &&
-			meta.Thanos.Source != metadata.BucketRepairSource &&
-			meta.Thanos.Source != metadata.CompactorSource &&
-			meta.Thanos.Source != metadata.CompactorRepairSource {
-
-			level.Debug(f.logger).Log("msg", "block is too fresh for now", "block", id)
-			synced.WithLabelValues(block.TooFreshMeta).Inc()
-			delete(metas, id)
-		}
-	}
 }
 
 // genMissingIndexCacheFiles scans over all blocks, generates missing index cache files and uploads them to object storage.

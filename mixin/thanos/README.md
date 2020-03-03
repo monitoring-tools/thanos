@@ -54,35 +54,35 @@ $ jb update
 
 #### Configure
 
-This project is intended to be used as a library. You can extend and customize dashboards and alerting rules by creating for own generators, such as the generators ([alerts.jsonnet](alerts.jsonnet) and [dashboards.jsonnet](dashboards.jsonnet)) that are use to create [examples](examples). Default parameters are collected in [defaults.jsonnet](defaults.jsonnet), feel free to modify and generate your own definitons.
+This project is intended to be used as a library. You can extend and customize dashboards and alerting rules by creating for own generators, such as the generators ([alerts.jsonnet](alerts.jsonnet) and [dashboards.jsonnet](dashboards.jsonnet)) that are use to create [examples](../../examples). Default parameters are collected in [defaults.libsonnet](defaults.libsonnet), feel free to modify and generate your own definitons.
 
 [embedmd]:# (defaults.libsonnet)
 ```libsonnet
 {
-  querier+:: {
-    jobPrefix: 'thanos-querier',
+  query+:: {
+    jobPrefix: 'thanos-query',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sQuerier' % $.dashboard.prefix,
+    title: '%(prefix)sQuery' % $.dashboard.prefix,
   },
   store+:: {
     jobPrefix: 'thanos-store',
     selector: 'job=~"%s.*"' % self.jobPrefix,
     title: '%(prefix)sStore' % $.dashboard.prefix,
   },
-  receiver+:: {
-    jobPrefix: 'thanos-receiver',
+  receive+:: {
+    jobPrefix: 'thanos-receive',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sReceiver' % $.dashboard.prefix,
+    title: '%(prefix)sReceive' % $.dashboard.prefix,
   },
-  ruler+:: {
-    jobPrefix: 'thanos-ruler',
+  rule+:: {
+    jobPrefix: 'thanos-rule',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sRuler' % $.dashboard.prefix,
+    title: '%(prefix)sRule' % $.dashboard.prefix,
   },
-  compactor+:: {
-    jobPrefix: 'thanos-compactor',
+  compact+:: {
+    jobPrefix: 'thanos-compact',
     selector: 'job=~"%s.*"' % self.jobPrefix,
-    title: '%(prefix)sCompactor' % $.dashboard.prefix,
+    title: '%(prefix)sCompact' % $.dashboard.prefix,
   },
   sidecar+:: {
     jobPrefix: 'thanos-sidecar',
@@ -147,7 +147,7 @@ You validate your structural correctness of your Prometheus [alerting rules](htt
 $ make example-rules-lint
 ```
 
-Check out [test.yaml](examples/alerts/tests.yaml) to add/modify tests for the mixin. To learn more about how to write test for Prometheus, check out [official documentation](https://www.prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/).
+Check out [test.yaml](../../examples/alerts/tests.yaml) to add/modify tests for the mixin. To learn more about how to write test for Prometheus, check out [official documentation](https://www.prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/).
 
 You test alerts with:
 

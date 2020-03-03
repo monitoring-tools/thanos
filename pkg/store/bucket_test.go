@@ -1,6 +1,10 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package store
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,7 +14,9 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,15 +26,24 @@ import (
 	"github.com/leanovate/gopter/gen"
 	"github.com/leanovate/gopter/prop"
 	"github.com/oklog/ulid"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/relabel"
+	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/thanos-io/thanos/pkg/block"
+	"github.com/thanos-io/thanos/pkg/block/indexheader"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/compact/downsample"
 	"github.com/thanos-io/thanos/pkg/objstore"
+	"github.com/thanos-io/thanos/pkg/objstore/filesystem"
 	"github.com/thanos-io/thanos/pkg/objstore/inmem"
+	"github.com/thanos-io/thanos/pkg/pool"
+	storecache "github.com/thanos-io/thanos/pkg/store/cache"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/testutil"
+	"github.com/thanos-io/thanos/pkg/testutil/e2eutil"
 	"gopkg.in/yaml.v2"
 )
 
@@ -199,7 +214,7 @@ func TestBucketBlockSet_addGet(t *testing.T) {
 		testutil.Ok(t, set.add(&bucketBlock{meta: &m}))
 	}
 
-	cases := []struct {
+	for _, c := range []struct {
 		mint, maxt    int64
 		maxResolution int64
 		res           []resBlock
@@ -223,6 +238,8 @@ func TestBucketBlockSet_addGet(t *testing.T) {
 				{window: downsample.ResLevel0, mint: 100, maxt: 200},
 				{window: downsample.ResLevel0, mint: 200, maxt: 300},
 				{window: downsample.ResLevel0, mint: 300, maxt: 400},
+				// Block intervals are half-open: [b.MinTime, b.MaxTime), so 400-500 contains single sample.
+				{window: downsample.ResLevel0, mint: 400, maxt: 500},
 			},
 		}, {
 			mint:          100,
@@ -246,20 +263,18 @@ func TestBucketBlockSet_addGet(t *testing.T) {
 				{window: downsample.ResLevel0, mint: 400, maxt: 500},
 			},
 		},
-	}
-	for i, c := range cases {
-		t.Logf("case %d", i)
-
-		var exp []*bucketBlock
-		for _, b := range c.res {
-			var m metadata.Meta
-			m.Thanos.Downsample.Resolution = b.window
-			m.MinTime = b.mint
-			m.MaxTime = b.maxt
-			exp = append(exp, &bucketBlock{meta: &m})
-		}
-		res := set.getFor(c.mint, c.maxt, c.maxResolution)
-		testutil.Equals(t, exp, res)
+	} {
+		t.Run("", func(t *testing.T) {
+			var exp []*bucketBlock
+			for _, b := range c.res {
+				var m metadata.Meta
+				m.Thanos.Downsample.Resolution = b.window
+				m.MinTime = b.mint
+				m.MaxTime = b.maxt
+				exp = append(exp, &bucketBlock{meta: &m})
+			}
+			testutil.Equals(t, exp, set.getFor(c.mint, c.maxt, c.maxResolution))
+		})
 	}
 }
 
@@ -447,6 +462,7 @@ func TestBucketStore_Info(t *testing.T) {
 		20,
 		allowAllFilterConf,
 		true,
+		true,
 	)
 	testutil.Ok(t, err)
 
@@ -464,15 +480,24 @@ type recorder struct {
 	mtx sync.Mutex
 	objstore.Bucket
 
-	touched []string
+	getRangeTouched []string
+	getTouched      []string
 }
 
 func (r *recorder) Get(ctx context.Context, name string) (io.ReadCloser, error) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
-	r.touched = append(r.touched, name)
+	r.getTouched = append(r.getTouched, name)
 	return r.Bucket.Get(ctx, name)
+}
+
+func (r *recorder) GetRange(ctx context.Context, name string, off, length int64) (io.ReadCloser, error) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	r.getRangeTouched = append(r.getRangeTouched, name)
+	return r.Bucket.GetRange(ctx, name, off, length)
 }
 
 func TestBucketStore_Sharding(t *testing.T) {
@@ -486,19 +511,19 @@ func TestBucketStore_Sharding(t *testing.T) {
 	bkt := inmem.NewBucket()
 	series := []labels.Labels{labels.FromStrings("a", "1", "b", "1")}
 
-	id1, err := testutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r1"}}, 0)
+	id1, err := e2eutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r1"}}, 0)
 	testutil.Ok(t, err)
 	testutil.Ok(t, block.Upload(ctx, logger, bkt, filepath.Join(dir, id1.String())))
 
-	id2, err := testutil.CreateBlock(ctx, dir, series, 10, 1000, 2000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r1"}}, 0)
+	id2, err := e2eutil.CreateBlock(ctx, dir, series, 10, 1000, 2000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r1"}}, 0)
 	testutil.Ok(t, err)
 	testutil.Ok(t, block.Upload(ctx, logger, bkt, filepath.Join(dir, id2.String())))
 
-	id3, err := testutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "b"}, {Name: "region", Value: "r1"}}, 0)
+	id3, err := e2eutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "b"}, {Name: "region", Value: "r1"}}, 0)
 	testutil.Ok(t, err)
 	testutil.Ok(t, block.Upload(ctx, logger, bkt, filepath.Join(dir, id3.String())))
 
-	id4, err := testutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r2"}}, 0)
+	id4, err := e2eutil.CreateBlock(ctx, dir, series, 10, 0, 1000, labels.Labels{{Name: "cluster", Value: "a"}, {Name: "region", Value: "r2"}}, 0)
 	testutil.Ok(t, err)
 	testutil.Ok(t, block.Upload(ctx, logger, bkt, filepath.Join(dir, id4.String())))
 
@@ -687,7 +712,9 @@ func testSharding(t *testing.T, reuseDisk string, bkt objstore.Bucket, all ...ul
 				false,
 				20,
 				allowAllFilterConf,
-				true)
+				true,
+				true,
+			)
 			testutil.Ok(t, err)
 
 			testutil.Ok(t, bucketStore.InitialSync(context.Background()))
@@ -714,16 +741,17 @@ func testSharding(t *testing.T, reuseDisk string, bkt objstore.Bucket, all ...ul
 			// Regression test: https://github.com/thanos-io/thanos/issues/1664
 
 			// Sort records. We load blocks concurrently so operations might be not ordered.
-			sort.Strings(rec.touched)
+			sort.Strings(rec.getRangeTouched)
 
-			fmt.Println(cached, sc.expectedIDs, all, rec.touched)
+			// With binary header nothing should be downloaded fully.
+			testutil.Equals(t, []string(nil), rec.getTouched)
 			if reuseDisk != "" {
-				testutil.Equals(t, expectedTouchedBlockOps(all, sc.expectedIDs, cached), rec.touched)
+				testutil.Equals(t, expectedTouchedBlockOps(all, sc.expectedIDs, cached), rec.getRangeTouched)
 				cached = sc.expectedIDs
 				return
 			}
 
-			testutil.Equals(t, expectedTouchedBlockOps(all, sc.expectedIDs, nil), rec.touched)
+			testutil.Equals(t, expectedTouchedBlockOps(all, sc.expectedIDs, nil), rec.getRangeTouched)
 		})
 	}
 }
@@ -752,11 +780,678 @@ func expectedTouchedBlockOps(all []ulid.ULID, expected []ulid.ULID, cached []uli
 
 		if found {
 			ops = append(ops,
-				path.Join(id.String(), block.IndexCacheFilename),
-				path.Join(id.String(), block.IndexFilename),
+				// To create binary header we touch part of index few times.
+				path.Join(id.String(), block.IndexFilename), // Version.
+				path.Join(id.String(), block.IndexFilename), // TOC.
+				path.Join(id.String(), block.IndexFilename), // Symbols.
+				path.Join(id.String(), block.IndexFilename), // PostingOffsets.
 			)
 		}
 	}
 	sort.Strings(ops)
 	return ops
+}
+
+// Regression tests against: https://github.com/thanos-io/thanos/issues/1983.
+func TestReadIndexCache_LoadSeries(t *testing.T) {
+	bkt := inmem.NewBucket()
+
+	s := newBucketStoreMetrics(nil)
+	b := &bucketBlock{
+		meta: &metadata.Meta{
+			BlockMeta: tsdb.BlockMeta{
+				ULID: ulid.MustNew(1, nil),
+			},
+		},
+		bkt:             bkt,
+		seriesRefetches: s.seriesRefetches,
+		logger:          log.NewNopLogger(),
+		indexCache:      noopCache{},
+	}
+
+	buf := encoding.Encbuf{}
+	buf.PutByte(0)
+	buf.PutByte(0)
+	buf.PutUvarint(10)
+	buf.PutString("aaaaaaaaaa")
+	buf.PutUvarint(10)
+	buf.PutString("bbbbbbbbbb")
+	buf.PutUvarint(10)
+	buf.PutString("cccccccccc")
+	testutil.Ok(t, bkt.Upload(context.Background(), filepath.Join(b.meta.ULID.String(), block.IndexFilename), bytes.NewReader(buf.Get())))
+
+	r := bucketIndexReader{
+		block:        b,
+		stats:        &queryStats{},
+		loadedSeries: map[uint64][]byte{},
+	}
+
+	// Success with no refetches.
+	testutil.Ok(t, r.loadSeries(context.TODO(), []uint64{2, 13, 24}, false, 2, 100))
+	testutil.Equals(t, map[uint64][]byte{
+		2:  []byte("aaaaaaaaaa"),
+		13: []byte("bbbbbbbbbb"),
+		24: []byte("cccccccccc"),
+	}, r.loadedSeries)
+	testutil.Equals(t, float64(0), promtest.ToFloat64(s.seriesRefetches))
+
+	// Success with 2 refetches.
+	r.loadedSeries = map[uint64][]byte{}
+	testutil.Ok(t, r.loadSeries(context.TODO(), []uint64{2, 13, 24}, false, 2, 15))
+	testutil.Equals(t, map[uint64][]byte{
+		2:  []byte("aaaaaaaaaa"),
+		13: []byte("bbbbbbbbbb"),
+		24: []byte("cccccccccc"),
+	}, r.loadedSeries)
+	testutil.Equals(t, float64(2), promtest.ToFloat64(s.seriesRefetches))
+
+	// Success with refetch on first element.
+	r.loadedSeries = map[uint64][]byte{}
+	testutil.Ok(t, r.loadSeries(context.TODO(), []uint64{2}, false, 2, 5))
+	testutil.Equals(t, map[uint64][]byte{
+		2: []byte("aaaaaaaaaa"),
+	}, r.loadedSeries)
+	testutil.Equals(t, float64(3), promtest.ToFloat64(s.seriesRefetches))
+
+	buf.Reset()
+	buf.PutByte(0)
+	buf.PutByte(0)
+	buf.PutUvarint(10)
+	buf.PutString("aaaaaaa")
+	testutil.Ok(t, bkt.Upload(context.Background(), filepath.Join(b.meta.ULID.String(), block.IndexFilename), bytes.NewReader(buf.Get())))
+
+	// Fail, but no recursion at least.
+	testutil.NotOk(t, r.loadSeries(context.TODO(), []uint64{2, 13, 24}, false, 1, 15))
+}
+
+func TestBucketIndexReader_ExpandedPostings(t *testing.T) {
+	t.Skip("")
+	tb := testutil.NewTB(t)
+
+	tmpDir, err := ioutil.TempDir("", "test-expanded-postings")
+	testutil.Ok(tb, err)
+	defer func() { testutil.Ok(tb, os.RemoveAll(tmpDir)) }()
+
+	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
+	testutil.Ok(tb, err)
+	defer func() { testutil.Ok(tb, bkt.Close()) }()
+
+	id := uploadTestBlock(tb, tmpDir, bkt)
+
+	tb.Run("binary_header", func(tb testutil.TB) {
+		r, err := indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id)
+		testutil.Ok(tb, err)
+
+		benchmarkExpandedPostings(tb, bkt, id, r)
+	})
+	tb.Run("index_json", func(tb testutil.TB) {
+		r, err := indexheader.NewJSONReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id)
+		testutil.Ok(tb, err)
+
+		benchmarkExpandedPostings(tb, bkt, id, r)
+	})
+}
+
+func BenchmarkBucketIndexReader_ExpandedPostings(b *testing.B) {
+	tb := testutil.NewTB(b)
+
+	tmpDir, err := ioutil.TempDir("", "bench-expanded-postings")
+	testutil.Ok(tb, err)
+	defer func() { testutil.Ok(tb, os.RemoveAll(tmpDir)) }()
+
+	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
+	testutil.Ok(tb, err)
+	defer func() { testutil.Ok(tb, bkt.Close()) }()
+
+	id := uploadTestBlock(tb, tmpDir, bkt)
+	tb.Run("binary_header", func(tb testutil.TB) {
+		r, err := indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id)
+		testutil.Ok(tb, err)
+
+		benchmarkExpandedPostings(tb, bkt, id, r)
+	})
+	tb.Run("index_json", func(tb testutil.TB) {
+		r, err := indexheader.NewJSONReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, id)
+		testutil.Ok(tb, err)
+
+		benchmarkExpandedPostings(tb, bkt, id, r)
+	})
+}
+
+// Make entries ~50B in size, to emulate real-world high cardinality.
+const (
+	postingsBenchSuffix = "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
+)
+
+func uploadTestBlock(t testing.TB, tmpDir string, bkt objstore.Bucket) ulid.ULID {
+	h, err := tsdb.NewHead(nil, nil, nil, 1000)
+	testutil.Ok(t, err)
+	defer func() {
+		testutil.Ok(t, h.Close())
+	}()
+
+	logger := log.NewNopLogger()
+
+	app := h.Appender()
+	addSeries := func(l labels.Labels) {
+		_, err := app.Add(l, 0, 0)
+		testutil.Ok(t, err)
+	}
+
+	for n := 0; n < 10; n++ {
+		for i := 0; i < 100000; i++ {
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+postingsBenchSuffix, "n", strconv.Itoa(n)+postingsBenchSuffix, "j", "foo"))
+			// Have some series that won't be matched, to properly test inverted matches.
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+postingsBenchSuffix, "n", strconv.Itoa(n)+postingsBenchSuffix, "j", "bar"))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+postingsBenchSuffix, "n", "0_"+strconv.Itoa(n)+postingsBenchSuffix, "j", "bar"))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+postingsBenchSuffix, "n", "1_"+strconv.Itoa(n)+postingsBenchSuffix, "j", "bar"))
+			addSeries(labels.FromStrings("i", strconv.Itoa(i)+postingsBenchSuffix, "n", "2_"+strconv.Itoa(n)+postingsBenchSuffix, "j", "foo"))
+		}
+	}
+	testutil.Ok(t, app.Commit())
+
+	testutil.Ok(t, os.MkdirAll(filepath.Join(tmpDir, "tmp"), os.ModePerm))
+	id := createBlockFromHead(t, filepath.Join(tmpDir, "tmp"), h)
+
+	_, err = metadata.InjectThanos(log.NewNopLogger(), filepath.Join(tmpDir, "tmp", id.String()), metadata.Thanos{
+		Labels:     labels.Labels{{Name: "ext1", Value: "1"}}.Map(),
+		Downsample: metadata.ThanosDownsample{Resolution: 0},
+		Source:     metadata.TestSource,
+	}, nil)
+	testutil.Ok(t, err)
+	testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(tmpDir, "tmp", id.String())))
+
+	return id
+}
+
+func createBlockFromHead(t testing.TB, dir string, head *tsdb.Head) ulid.ULID {
+	compactor, err := tsdb.NewLeveledCompactor(context.Background(), nil, log.NewNopLogger(), []int64{1000000}, nil)
+	testutil.Ok(t, err)
+
+	testutil.Ok(t, os.MkdirAll(dir, 0777))
+
+	// Add +1 millisecond to block maxt because block intervals are half-open: [b.MinTime, b.MaxTime).
+	// Because of this block intervals are always +1 than the total samples it includes.
+	ulid, err := compactor.Write(dir, head, head.MinTime(), head.MaxTime()+1, nil)
+	testutil.Ok(t, err)
+	return ulid
+}
+
+// Very similar benchmark to ths: https://github.com/prometheus/prometheus/blob/1d1732bc25cc4b47f513cb98009a4eb91879f175/tsdb/querier_bench_test.go#L82,
+// but with postings results check when run as test.
+func benchmarkExpandedPostings(
+	t testutil.TB,
+	bkt objstore.BucketReader,
+	id ulid.ULID,
+	r indexheader.Reader,
+) {
+	n1 := labels.MustNewMatcher(labels.MatchEqual, "n", "1"+postingsBenchSuffix)
+
+	jFoo := labels.MustNewMatcher(labels.MatchEqual, "j", "foo")
+	jNotFoo := labels.MustNewMatcher(labels.MatchNotEqual, "j", "foo")
+
+	iStar := labels.MustNewMatcher(labels.MatchRegexp, "i", "^.*$")
+	iPlus := labels.MustNewMatcher(labels.MatchRegexp, "i", "^.+$")
+	i1Plus := labels.MustNewMatcher(labels.MatchRegexp, "i", "^1.+$")
+	iEmptyRe := labels.MustNewMatcher(labels.MatchRegexp, "i", "^$")
+	iNotEmpty := labels.MustNewMatcher(labels.MatchNotEqual, "i", "")
+	iNot2 := labels.MustNewMatcher(labels.MatchNotEqual, "n", "2"+postingsBenchSuffix)
+	iNot2Star := labels.MustNewMatcher(labels.MatchNotRegexp, "i", "^2.*$")
+
+	cases := []struct {
+		name     string
+		matchers []*labels.Matcher
+
+		expectedLen int
+	}{
+		{`n="1"`, []*labels.Matcher{n1}, 200000},
+		{`n="1",j="foo"`, []*labels.Matcher{n1, jFoo}, 100000},
+		{`j="foo",n="1"`, []*labels.Matcher{jFoo, n1}, 100000},
+		{`n="1",j!="foo"`, []*labels.Matcher{n1, jNotFoo}, 100000},
+		{`i=~".*"`, []*labels.Matcher{iStar}, 5000000},
+		{`i=~".+"`, []*labels.Matcher{iPlus}, 5000000},
+		{`i=~""`, []*labels.Matcher{iEmptyRe}, 0},
+		{`i!=""`, []*labels.Matcher{iNotEmpty}, 5000000},
+		{`n="1",i=~".*",j="foo"`, []*labels.Matcher{n1, iStar, jFoo}, 100000},
+		{`n="1",i=~".*",i!="2",j="foo"`, []*labels.Matcher{n1, iStar, iNot2, jFoo}, 100000},
+		{`n="1",i!=""`, []*labels.Matcher{n1, iNotEmpty}, 200000},
+		{`n="1",i!="",j="foo"`, []*labels.Matcher{n1, iNotEmpty, jFoo}, 100000},
+		{`n="1",i=~".+",j="foo"`, []*labels.Matcher{n1, iPlus, jFoo}, 100000},
+		{`n="1",i=~"1.+",j="foo"`, []*labels.Matcher{n1, i1Plus, jFoo}, 11111},
+		{`n="1",i=~".+",i!="2",j="foo"`, []*labels.Matcher{n1, iPlus, iNot2, jFoo}, 100000},
+		{`n="1",i=~".+",i!~"2.*",j="foo"`, []*labels.Matcher{n1, iPlus, iNot2Star, jFoo}, 88889},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t testutil.TB) {
+			b := &bucketBlock{
+				logger:            log.NewNopLogger(),
+				indexHeaderReader: r,
+				indexCache:        noopCache{},
+				bkt:               bkt,
+				meta:              &metadata.Meta{BlockMeta: tsdb.BlockMeta{ULID: id}},
+				partitioner:       gapBasedPartitioner{maxGapSize: partitionerMaxGapSize},
+			}
+
+			indexr := newBucketIndexReader(context.Background(), b)
+
+			t.ResetTimer()
+			for i := 0; i < t.N(); i++ {
+				p, err := indexr.ExpandedPostings(c.matchers)
+				testutil.Ok(t, err)
+				testutil.Equals(t, c.expectedLen, len(p))
+			}
+		})
+	}
+}
+
+func newSeries(t testing.TB, lset labels.Labels, smplChunks [][]sample) storepb.Series {
+	var s storepb.Series
+
+	for _, l := range lset {
+		s.Labels = append(s.Labels, storepb.Label{Name: l.Name, Value: l.Value})
+	}
+
+	for _, smpls := range smplChunks {
+		c := chunkenc.NewXORChunk()
+		a, err := c.Appender()
+		testutil.Ok(t, err)
+
+		for _, smpl := range smpls {
+			a.Append(smpl.t, smpl.v)
+		}
+
+		ch := storepb.AggrChunk{
+			MinTime: smpls[0].t,
+			MaxTime: smpls[len(smpls)-1].t,
+			Raw:     &storepb.Chunk{Type: storepb.Chunk_XOR, Data: c.Bytes()},
+		}
+
+		s.Chunks = append(s.Chunks, ch)
+	}
+	return s
+}
+
+func TestSeries_200kSeriesWithOneSample(t *testing.T) {
+	benchSeries_SeriesWithOneSample(testutil.NewTB(t), 200000)
+}
+func BenchmarkSeries(b *testing.B) {
+	benchSeries_SeriesWithOneSample(testutil.NewTB(b), 10000000)
+}
+
+func benchSeries_SeriesWithOneSample(t testutil.TB, totalSeries int) {
+	tmpDir, err := ioutil.TempDir("", "testorbench-series")
+	testutil.Ok(t, err)
+	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+
+	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
+	testutil.Ok(t, err)
+	defer func() { testutil.Ok(t, bkt.Close()) }()
+
+	logger := log.NewNopLogger()
+	var blocks []*bucketBlock
+
+	numSeriesPerBlock := totalSeries / 4
+	series := make([]storepb.Series, 0, 4*numSeriesPerBlock)
+
+	thanosMeta := metadata.Thanos{
+		Labels:     labels.Labels{{Name: "ext1", Value: "1"}}.Map(),
+		Downsample: metadata.ThanosDownsample{Resolution: 0},
+		Source:     metadata.TestSource,
+	}
+
+	var chunkPool pool.BytesPool
+	chunkPool, err = pool.NewBucketedBytesPool(maxChunkSize, 50e6, 2, 100e7)
+	testutil.Ok(t, err)
+
+	if !t.IsBenchmark() {
+		bucketedPool, err := pool.NewBucketedBytesPool(maxChunkSize, 50e6, 2, 100e7)
+		testutil.Ok(t, err)
+
+		chunkPool = &mockedPool{parent: bucketedPool}
+	}
+
+	// Create 4 blocks. Each will have numSeriesPerBlock number of series that have 1 sample only.
+	// Timestamp will be counted for each new series, so each series will have unique timestamp.
+	// This allows to pick time range that will correspond to number of series picked 1:1.
+	for bi := 0; bi < 4; bi++ {
+		h, err := tsdb.NewHead(nil, nil, nil, 1)
+		testutil.Ok(t, err)
+		defer testutil.Ok(t, h.Close())
+
+		app := h.Appender()
+
+		for i := 0; i < numSeriesPerBlock; i++ {
+			ts := int64(bi*numSeriesPerBlock + i)
+			lbls := labels.FromStrings("foo", "bar", "i", fmt.Sprintf("%07d%s", ts, postingsBenchSuffix))
+			series = append(series, newSeries(t, append(labels.Labels{{Name: "ext1", Value: "1"}}, lbls...), [][]sample{{sample{t: ts, v: 0}}}))
+
+			_, err := app.Add(lbls, ts, 0)
+			testutil.Ok(t, err)
+		}
+		testutil.Ok(t, app.Commit())
+
+		blockDir := filepath.Join(tmpDir, "tmp")
+		id := createBlockFromHead(t, blockDir, h)
+
+		meta, err := metadata.InjectThanos(log.NewNopLogger(), filepath.Join(blockDir, id.String()), thanosMeta, nil)
+		testutil.Ok(t, err)
+		testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(blockDir, id.String())))
+
+		b := &bucketBlock{
+			indexCache:  noopCache{},
+			logger:      logger,
+			bkt:         bkt,
+			meta:        meta,
+			partitioner: gapBasedPartitioner{maxGapSize: partitionerMaxGapSize},
+			chunkObjs:   []string{filepath.Join(id.String(), "chunks", "000001")},
+			chunkPool:   chunkPool,
+		}
+		blocks = append(blocks, b)
+	}
+
+	store := &BucketStore{
+		bkt:        bkt,
+		logger:     logger,
+		indexCache: noopCache{},
+		metrics:    newBucketStoreMetrics(nil),
+		blockSets: map[uint64]*bucketBlockSet{
+			labels.Labels{{Name: "ext1", Value: "1"}}.Hash(): {blocks: [][]*bucketBlock{blocks}},
+		},
+		queryGate:      noopGater{},
+		samplesLimiter: noopLimiter{},
+	}
+
+	var cases []*benchSeriesCase
+	if t.IsBenchmark() {
+		for s := 1; s <= 4*numSeriesPerBlock; s *= 10 {
+			cases = append(cases, &benchSeriesCase{
+				name: fmt.Sprintf("%dof%d", s, 4*numSeriesPerBlock),
+				req: &storepb.SeriesRequest{
+					MinTime: 0,
+					MaxTime: int64(s) - 1,
+					Matchers: []storepb.LabelMatcher{
+						{Type: storepb.LabelMatcher_EQ, Name: "foo", Value: "bar"},
+					},
+				},
+				expected: series[:s],
+			})
+		}
+	} else {
+		// For test just go straight away to the largest one, we care here only about correctness.
+		s := totalSeries
+
+		cases = append(cases, &benchSeriesCase{
+			name: fmt.Sprintf("%dof%d", s, 4*numSeriesPerBlock),
+			req: &storepb.SeriesRequest{
+				MinTime: 0,
+				MaxTime: int64(s) - 1,
+				Matchers: []storepb.LabelMatcher{
+					{Type: storepb.LabelMatcher_EQ, Name: "foo", Value: "bar"},
+				},
+			},
+			expected: series[:s],
+		})
+	}
+
+	t.Run("binary_header", func(t testutil.TB) {
+		for _, block := range blocks {
+			block.indexHeaderReader, err = indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, block.meta.ULID)
+			testutil.Ok(t, err)
+		}
+
+		benchmarkSeries(t, store, cases)
+		if !t.IsBenchmark() {
+			// Make sure pool is correctly used.
+			testutil.Equals(t, 4, int(chunkPool.(*mockedPool).gets))
+			testutil.Equals(t, 0, int(chunkPool.(*mockedPool).balance))
+			chunkPool.(*mockedPool).gets = 0
+		}
+	})
+
+	t.Run("index_json", func(t testutil.TB) {
+		for _, block := range blocks {
+			block.indexHeaderReader, err = indexheader.NewJSONReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, block.meta.ULID)
+			testutil.Ok(t, err)
+		}
+
+		benchmarkSeries(t, store, cases)
+		if !t.IsBenchmark() {
+			// Make sure pool is correctly used.
+			testutil.Equals(t, 4, int(chunkPool.(*mockedPool).gets))
+			testutil.Equals(t, 0, int(chunkPool.(*mockedPool).balance))
+		}
+	})
+}
+
+type mockedPool struct {
+	parent  pool.BytesPool
+	balance uint64
+	gets    uint64
+}
+
+func (m *mockedPool) Get(sz int) (*[]byte, error) {
+	b, err := m.parent.Get(sz)
+	if err != nil {
+		return nil, err
+	}
+	atomic.AddUint64(&m.balance, uint64(cap(*b)))
+	atomic.AddUint64(&m.gets, uint64(1))
+	return b, nil
+}
+
+func (m *mockedPool) Put(b *[]byte) {
+	atomic.AddUint64(&m.balance, ^uint64(cap(*b)-1))
+	m.parent.Put(b)
+}
+
+type noopGater struct{}
+
+func (noopGater) IsMyTurn(context.Context) error { return nil }
+func (noopGater) Done()                          {}
+
+type noopLimiter struct{}
+
+func (noopLimiter) Check(uint64) error { return nil }
+
+type benchSeriesCase struct {
+	name     string
+	req      *storepb.SeriesRequest
+	expected []storepb.Series
+}
+
+func benchmarkSeries(t testutil.TB, store *BucketStore, cases []*benchSeriesCase) {
+	for _, c := range cases {
+		t.Run(c.name, func(t testutil.TB) {
+			t.ResetTimer()
+			for i := 0; i < t.N(); i++ {
+				srv := newStoreSeriesServer(context.Background())
+				testutil.Ok(t, store.Series(c.req, srv))
+				testutil.Equals(t, 0, len(srv.Warnings))
+				testutil.Equals(t, len(c.expected), len(srv.SeriesSet))
+
+				if !t.IsBenchmark() {
+					// This will give unreadable output for millions of series error.
+					testutil.Equals(t, c.expected, srv.SeriesSet)
+				}
+
+			}
+		})
+	}
+}
+
+// Regression test against: https://github.com/thanos-io/thanos/issues/2147.
+func TestSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "segfault-series")
+	testutil.Ok(t, err)
+	defer func() { testutil.Ok(t, os.RemoveAll(tmpDir)) }()
+
+	bkt, err := filesystem.NewBucket(filepath.Join(tmpDir, "bkt"))
+	testutil.Ok(t, err)
+	defer func() { testutil.Ok(t, bkt.Close()) }()
+
+	logger := log.NewNopLogger()
+
+	thanosMeta := metadata.Thanos{
+		Labels:     labels.Labels{{Name: "ext1", Value: "1"}}.Map(),
+		Downsample: metadata.ThanosDownsample{Resolution: 0},
+		Source:     metadata.TestSource,
+	}
+
+	chunkPool, err := pool.NewBucketedBytesPool(maxChunkSize, 50e6, 2, 100e7)
+	testutil.Ok(t, err)
+
+	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{
+		MaxItemSize: 3000,
+		// This is the exact size of cache needed for our *single request*.
+		// This is limited in order to make sure we test evictions.
+		MaxSize: 8889,
+	})
+	testutil.Ok(t, err)
+
+	var b1 *bucketBlock
+
+	const numSeries = 100
+
+	// Create 4 blocks. Each will have numSeriesPerBlock number of series that have 1 sample only.
+	// Timestamp will be counted for each new series, so each series will have unique timestamp.
+	// This allows to pick time range that will correspond to number of series picked 1:1.
+	{
+		// Block 1.
+		h, err := tsdb.NewHead(nil, nil, nil, 1)
+		testutil.Ok(t, err)
+		defer testutil.Ok(t, h.Close())
+
+		app := h.Appender()
+
+		for i := 0; i < numSeries; i++ {
+			ts := int64(i)
+			lbls := labels.FromStrings("foo", "bar", "b", "1", "i", fmt.Sprintf("%07d%s", ts, postingsBenchSuffix))
+
+			_, err := app.Add(lbls, ts, 0)
+			testutil.Ok(t, err)
+		}
+		testutil.Ok(t, app.Commit())
+
+		blockDir := filepath.Join(tmpDir, "tmp")
+		id := createBlockFromHead(t, blockDir, h)
+
+		meta, err := metadata.InjectThanos(log.NewNopLogger(), filepath.Join(blockDir, id.String()), thanosMeta, nil)
+		testutil.Ok(t, err)
+		testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(blockDir, id.String())))
+
+		b1 = &bucketBlock{
+			indexCache:  indexCache,
+			logger:      logger,
+			bkt:         bkt,
+			meta:        meta,
+			partitioner: gapBasedPartitioner{maxGapSize: partitionerMaxGapSize},
+			chunkObjs:   []string{filepath.Join(id.String(), "chunks", "000001")},
+			chunkPool:   chunkPool,
+		}
+		b1.indexHeaderReader, err = indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b1.meta.ULID)
+		testutil.Ok(t, err)
+	}
+
+	var b2 *bucketBlock
+	{
+		// Block 2, do not load this block yet.
+		h, err := tsdb.NewHead(nil, nil, nil, 1)
+		testutil.Ok(t, err)
+		defer testutil.Ok(t, h.Close())
+
+		app := h.Appender()
+
+		for i := 0; i < numSeries; i++ {
+			ts := int64(i)
+			lbls := labels.FromStrings("foo", "bar", "b", "2", "i", fmt.Sprintf("%07d%s", ts, postingsBenchSuffix))
+
+			_, err := app.Add(lbls, ts, 0)
+			testutil.Ok(t, err)
+		}
+		testutil.Ok(t, app.Commit())
+
+		blockDir := filepath.Join(tmpDir, "tmp2")
+		id := createBlockFromHead(t, blockDir, h)
+
+		meta, err := metadata.InjectThanos(log.NewNopLogger(), filepath.Join(blockDir, id.String()), thanosMeta, nil)
+		testutil.Ok(t, err)
+		testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(blockDir, id.String())))
+
+		b2 = &bucketBlock{
+			indexCache:  indexCache,
+			logger:      logger,
+			bkt:         bkt,
+			meta:        meta,
+			partitioner: gapBasedPartitioner{maxGapSize: partitionerMaxGapSize},
+			chunkObjs:   []string{filepath.Join(id.String(), "chunks", "000001")},
+			chunkPool:   chunkPool,
+		}
+		b2.indexHeaderReader, err = indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, b2.meta.ULID)
+		testutil.Ok(t, err)
+	}
+
+	store := &BucketStore{
+		bkt:        bkt,
+		logger:     logger,
+		indexCache: indexCache,
+		metrics:    newBucketStoreMetrics(nil),
+		blockSets: map[uint64]*bucketBlockSet{
+			labels.Labels{{Name: "ext1", Value: "1"}}.Hash(): {blocks: [][]*bucketBlock{{b1, b2}}},
+		},
+		blocks: map[ulid.ULID]*bucketBlock{
+			b1.meta.ULID: b1,
+			b2.meta.ULID: b2,
+		},
+		queryGate:      noopGater{},
+		samplesLimiter: noopLimiter{},
+	}
+
+	t.Run("invoke series for one block. Fill the cache on the way.", func(t *testing.T) {
+		srv := newStoreSeriesServer(context.Background())
+		testutil.Ok(t, store.Series(&storepb.SeriesRequest{
+			MinTime: 0,
+			MaxTime: int64(numSeries) - 1,
+			Matchers: []storepb.LabelMatcher{
+				{Type: storepb.LabelMatcher_EQ, Name: "foo", Value: "bar"},
+				{Type: storepb.LabelMatcher_EQ, Name: "b", Value: "1"},
+				// This bug shows only when we use lot's of symbols for matching.
+				{Type: storepb.LabelMatcher_NEQ, Name: "i", Value: ""},
+			},
+		}, srv))
+		testutil.Equals(t, 0, len(srv.Warnings))
+		testutil.Equals(t, numSeries, len(srv.SeriesSet))
+	})
+	t.Run("invoke series for second block. This should revoke previous cache.", func(t *testing.T) {
+		srv := newStoreSeriesServer(context.Background())
+		testutil.Ok(t, store.Series(&storepb.SeriesRequest{
+			MinTime: 0,
+			MaxTime: int64(numSeries) - 1,
+			Matchers: []storepb.LabelMatcher{
+				{Type: storepb.LabelMatcher_EQ, Name: "foo", Value: "bar"},
+				{Type: storepb.LabelMatcher_EQ, Name: "b", Value: "2"},
+				// This bug shows only when we use lot's of symbols for matching.
+				{Type: storepb.LabelMatcher_NEQ, Name: "i", Value: ""},
+			},
+		}, srv))
+		testutil.Equals(t, 0, len(srv.Warnings))
+		testutil.Equals(t, numSeries, len(srv.SeriesSet))
+	})
+	t.Run("remove second block. Cache stays. Ask for first again.", func(t *testing.T) {
+		testutil.Ok(t, store.removeBlock(b2.meta.ULID))
+
+		srv := newStoreSeriesServer(context.Background())
+		testutil.Ok(t, store.Series(&storepb.SeriesRequest{
+			MinTime: 0,
+			MaxTime: int64(numSeries) - 1,
+			Matchers: []storepb.LabelMatcher{
+				{Type: storepb.LabelMatcher_EQ, Name: "foo", Value: "bar"},
+				{Type: storepb.LabelMatcher_EQ, Name: "b", Value: "1"},
+				// This bug shows only when we use lot's of symbols for matching.
+				{Type: storepb.LabelMatcher_NEQ, Name: "i", Value: ""},
+			},
+		}, srv))
+		testutil.Equals(t, 0, len(srv.Warnings))
+		testutil.Equals(t, numSeries, len(srv.SeriesSet))
+	})
 }

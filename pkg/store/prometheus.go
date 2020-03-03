@@ -1,3 +1,6 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package store
 
 import (
@@ -30,6 +33,7 @@ import (
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/thanos-io/thanos/pkg/component"
+	"github.com/thanos-io/thanos/pkg/exthttp"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/tracing"
@@ -82,7 +86,7 @@ func NewPrometheusStore(
 	}
 	if client == nil {
 		client = &http.Client{
-			Transport: tracing.HTTPTripperware(logger, http.DefaultTransport),
+			Transport: tracing.HTTPTripperware(logger, exthttp.NewTransport()),
 		}
 	}
 	p := &PrometheusStore{
@@ -428,6 +432,11 @@ func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) 
 		return nil, errors.Wrap(err, "marshal read request")
 	}
 
+	qjson, err := json.Marshal(q)
+	if err != nil {
+		return nil, errors.Wrap(err, "json encode query for tracing")
+	}
+
 	u := *p.base
 	u.Path = path.Join(u.Path, "api/v1/read")
 
@@ -438,13 +447,13 @@ func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) 
 	preq.Header.Add("Content-Encoding", "snappy")
 	preq.Header.Set("Content-Type", "application/x-stream-protobuf")
 	preq.Header.Set("User-Agent", userAgent)
-	spanReqDo, ctx := tracing.StartSpan(ctx, "query_prometheus_request")
+	spanReqDo, ctx := tracing.StartSpan(ctx, "query_prometheus_request", opentracing.Tag{Key: "prometheus.query", Value: string(qjson)})
 	preq = preq.WithContext(ctx)
 	presp, err := p.client.Do(preq)
+	spanReqDo.Finish()
 	if err != nil {
 		return nil, errors.Wrap(err, "send request")
 	}
-	spanReqDo.Finish()
 	if presp.StatusCode/100 != 2 {
 		// Best effort read.
 		b, err := ioutil.ReadAll(presp.Body)

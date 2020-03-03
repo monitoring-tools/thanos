@@ -1,13 +1,19 @@
+// Copyright (c) The Thanos Authors.
+// Licensed under the Apache License 2.0.
+
 package block
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
@@ -20,6 +26,7 @@ import (
 	"github.com/prometheus/prometheus/pkg/relabel"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/extprom"
 	"github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/objstore"
 	"github.com/thanos-io/thanos/pkg/objstore/objtesting"
@@ -263,7 +270,7 @@ func TestMetaFetcher_Fetch(t *testing.T) {
 				testutil.Equals(t, 0.0, promtest.ToFloat64(f.metrics.synced.WithLabelValues(labelExcludedMeta)))
 				testutil.Equals(t, 0.0, promtest.ToFloat64(f.metrics.synced.WithLabelValues(timeExcludedMeta)))
 				testutil.Equals(t, float64(expectedFailures), promtest.ToFloat64(f.metrics.synced.WithLabelValues(failedMeta)))
-				testutil.Equals(t, 0.0, promtest.ToFloat64(f.metrics.synced.WithLabelValues(TooFreshMeta)))
+				testutil.Equals(t, 0.0, promtest.ToFloat64(f.metrics.synced.WithLabelValues(tooFreshMeta)))
 			}); !ok {
 				return
 			}
@@ -389,4 +396,484 @@ func TestTimePartitionMetaFilter_Filter(t *testing.T) {
 	testutil.Equals(t, 2.0, promtest.ToFloat64(synced.WithLabelValues(timeExcludedMeta)))
 	testutil.Equals(t, expected, input)
 
+}
+
+type sourcesAndResolution struct {
+	sources    []ulid.ULID
+	resolution int64
+}
+
+func TestDeduplicateFilter_Filter(t *testing.T) {
+	for _, tcase := range []struct {
+		name     string
+		input    map[ulid.ULID]*sourcesAndResolution
+		expected []ulid.ULID
+	}{
+		{
+			name: "3 non compacted blocks in bucket",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(2): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2)},
+					resolution: 0,
+				},
+				ULID(3): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(3)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(1),
+				ULID(2),
+				ULID(3),
+			},
+		},
+		{
+			name: "compacted block with sources in bucket",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6)},
+					resolution: 0,
+				},
+				ULID(4): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(3), ULID(2)},
+					resolution: 0,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(5)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(4),
+				ULID(5),
+				ULID(6),
+			},
+		},
+		{
+			name: "two compacted blocks with same sources",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(5)},
+					resolution: 0,
+				},
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6)},
+					resolution: 0,
+				},
+				ULID(3): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(4): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(3),
+				ULID(5),
+				ULID(6),
+			},
+		},
+		{
+			name: "two compacted blocks with overlapping sources",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(4): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6)},
+					resolution: 0,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(3), ULID(2)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(5),
+				ULID(6),
+			},
+		},
+		{
+			name: "3 non compacted blocks and compacted block of level 2 in bucket",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6)},
+					resolution: 0,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(2): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2)},
+					resolution: 0,
+				},
+				ULID(3): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(3)},
+					resolution: 0,
+				},
+				ULID(4): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2), ULID(1), ULID(3)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(4),
+				ULID(6),
+			},
+		},
+		{
+			name: "3 compacted blocks of level 2 and one compacted block of level 3 in bucket",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(10): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2), ULID(3)},
+					resolution: 0,
+				},
+				ULID(11): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6), ULID(4), ULID(5)},
+					resolution: 0,
+				},
+				ULID(14): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(14)},
+					resolution: 0,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(13): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(6), ULID(2), ULID(3), ULID(5), ULID(7), ULID(4), ULID(8), ULID(9)},
+					resolution: 0,
+				},
+				ULID(12): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(7), ULID(9), ULID(8)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(14),
+				ULID(13),
+			},
+		},
+		{
+			name: "compacted blocks with overlapping sources",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(8): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(3), ULID(2), ULID(4)},
+					resolution: 0,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(3), ULID(2), ULID(4)},
+					resolution: 0,
+				},
+				ULID(7): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(3), ULID(1), ULID(2)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(6),
+			},
+		},
+		{
+			name: "compacted blocks of level 3 with overlapping sources of equal length",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(10): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2), ULID(6), ULID(7)},
+					resolution: 0,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(11): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6), ULID(8), ULID(1), ULID(2)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(10),
+				ULID(11),
+			},
+		},
+		{
+			name: "compacted blocks of level 3 with overlapping sources of different length",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(10): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6), ULID(7), ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(11): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2), ULID(3), ULID(1)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(10),
+				ULID(11),
+			},
+		},
+		{
+			name: "blocks with same sources and different resolutions",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(2): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 1000,
+				},
+				ULID(3): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 10000,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(1),
+				ULID(2),
+				ULID(3),
+			},
+		},
+		{
+			name: "compacted blocks with overlapping sources and different resolutions",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(6): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6)},
+					resolution: 10000,
+				},
+				ULID(4): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(3), ULID(2)},
+					resolution: 0,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2), ULID(3), ULID(1)},
+					resolution: 1000,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(4),
+				ULID(5),
+				ULID(6),
+			},
+		},
+		{
+			name: "compacted blocks of level 3 with overlapping sources of different length and different resolutions",
+			input: map[ulid.ULID]*sourcesAndResolution{
+				ULID(10): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(7), ULID(5), ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(12): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(6), ULID(7), ULID(1)},
+					resolution: 10000,
+				},
+				ULID(1): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 0,
+				},
+				ULID(13): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1)},
+					resolution: 10000,
+				},
+				ULID(5): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(1), ULID(2)},
+					resolution: 0,
+				},
+				ULID(11): &sourcesAndResolution{
+					sources:    []ulid.ULID{ULID(2), ULID(3), ULID(1)},
+					resolution: 0,
+				},
+			},
+			expected: []ulid.ULID{
+				ULID(10),
+				ULID(11),
+				ULID(12),
+			},
+		},
+	} {
+		f := NewDeduplicateFilter()
+		if ok := t.Run(tcase.name, func(t *testing.T) {
+			synced := prometheus.NewGaugeVec(prometheus.GaugeOpts{}, []string{"state"})
+			metas := make(map[ulid.ULID]*metadata.Meta)
+			inputLen := len(tcase.input)
+			for id, metaInfo := range tcase.input {
+				metas[id] = &metadata.Meta{
+					BlockMeta: tsdb.BlockMeta{
+						ULID: id,
+						Compaction: tsdb.BlockMetaCompaction{
+							Sources: metaInfo.sources,
+						},
+					},
+					Thanos: metadata.Thanos{
+						Downsample: metadata.ThanosDownsample{
+							Resolution: metaInfo.resolution,
+						},
+					},
+				}
+			}
+			f.Filter(metas, synced, false)
+
+			compareSliceWithMapKeys(t, metas, tcase.expected)
+			testutil.Equals(t, float64(inputLen-len(tcase.expected)), promtest.ToFloat64(synced.WithLabelValues(duplicateMeta)))
+		}); !ok {
+			return
+		}
+	}
+}
+
+func compareSliceWithMapKeys(tb testing.TB, m map[ulid.ULID]*metadata.Meta, s []ulid.ULID) {
+	_, file, line, _ := runtime.Caller(1)
+	matching := true
+	if len(m) != len(s) {
+		matching = false
+	}
+
+	for _, val := range s {
+		if m[val] == nil {
+			matching = false
+			break
+		}
+	}
+
+	if !matching {
+		var mapKeys []ulid.ULID
+		for id := range m {
+			mapKeys = append(mapKeys, id)
+		}
+		fmt.Printf("\033[31m%s:%d:\n\n\texp keys: %#v\n\n\tgot: %#v\033[39m\n\n", filepath.Base(file), line, mapKeys, s)
+		tb.FailNow()
+	}
+}
+
+type ulidBuilder struct {
+	entropy *rand.Rand
+
+	created []ulid.ULID
+}
+
+func (u *ulidBuilder) ULID(t time.Time) ulid.ULID {
+	if u.entropy == nil {
+		source := rand.NewSource(1234)
+		u.entropy = rand.New(source)
+	}
+
+	id := ulid.MustNew(ulid.Timestamp(t), u.entropy)
+	u.created = append(u.created, id)
+	return id
+}
+
+func TestConsistencyDelayMetaFilter_Filter_0(t *testing.T) {
+	u := &ulidBuilder{}
+	now := time.Now()
+
+	input := map[ulid.ULID]*metadata.Meta{
+		// Fresh blocks.
+		u.ULID(now):                       {Thanos: metadata.Thanos{Source: metadata.SidecarSource}},
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.SidecarSource}},
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.ReceiveSource}},
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.RulerSource}},
+
+		// For now non-delay delete sources, should be ignored by consistency delay.
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.BucketRepairSource}},
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorSource}},
+		u.ULID(now.Add(-1 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorRepairSource}},
+
+		// 29m.
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.SidecarSource}},
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.ReceiveSource}},
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.RulerSource}},
+
+		// For now non-delay delete sources, should be ignored by consistency delay.
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.BucketRepairSource}},
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorSource}},
+		u.ULID(now.Add(-29 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorRepairSource}},
+
+		// 30m.
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.SidecarSource}},
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.ReceiveSource}},
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.RulerSource}},
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.BucketRepairSource}},
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorSource}},
+		u.ULID(now.Add(-30 * time.Minute)): {Thanos: metadata.Thanos{Source: metadata.CompactorRepairSource}},
+
+		// 30m+.
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.SidecarSource}},
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.ReceiveSource}},
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.RulerSource}},
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.BucketRepairSource}},
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.CompactorSource}},
+		u.ULID(now.Add(-20 * time.Hour)): {Thanos: metadata.Thanos{Source: metadata.CompactorRepairSource}},
+	}
+
+	t.Run("consistency 0 (turned off)", func(t *testing.T) {
+		synced := prometheus.NewGaugeVec(prometheus.GaugeOpts{}, []string{"state"})
+		expected := map[ulid.ULID]*metadata.Meta{}
+		// Copy all.
+		for _, id := range u.created {
+			expected[id] = input[id]
+		}
+
+		reg := prometheus.NewRegistry()
+		f := NewConsistencyDelayMetaFilter(nil, 0*time.Second, reg)
+		testutil.Equals(t, map[string]float64{"consistency_delay_seconds": 0.0}, extprom.CurrentGaugeValuesFor(t, reg, "consistency_delay_seconds"))
+
+		f.Filter(input, synced, false)
+
+		testutil.Equals(t, 0.0, promtest.ToFloat64(synced.WithLabelValues(tooFreshMeta)))
+		testutil.Equals(t, expected, input)
+	})
+
+	t.Run("consistency 30m.", func(t *testing.T) {
+		synced := prometheus.NewGaugeVec(prometheus.GaugeOpts{}, []string{"state"})
+		expected := map[ulid.ULID]*metadata.Meta{}
+		// Only certain sources and those with 30m or more age go through.
+		for i, id := range u.created {
+			// Younger than 30m.
+			if i < 13 {
+				if input[id].Thanos.Source != metadata.BucketRepairSource &&
+					input[id].Thanos.Source != metadata.CompactorSource &&
+					input[id].Thanos.Source != metadata.CompactorRepairSource {
+					continue
+				}
+			}
+			expected[id] = input[id]
+		}
+
+		reg := prometheus.NewRegistry()
+		f := NewConsistencyDelayMetaFilter(nil, 30*time.Minute, reg)
+		testutil.Equals(t, map[string]float64{"consistency_delay_seconds": (30 * time.Minute).Seconds()}, extprom.CurrentGaugeValuesFor(t, reg, "consistency_delay_seconds"))
+
+		f.Filter(input, synced, false)
+
+		testutil.Equals(t, float64(len(u.created)-len(expected)), promtest.ToFloat64(synced.WithLabelValues(tooFreshMeta)))
+		testutil.Equals(t, expected, input)
+	})
 }
