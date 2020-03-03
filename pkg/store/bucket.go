@@ -22,6 +22,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/oklog/ulid"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/pkg/labels"
@@ -637,6 +638,7 @@ func (s *bucketSeriesSet) Err() error {
 }
 
 func blockSeries(
+	ctx context.Context,
 	extLset map[string]string,
 	indexr *bucketIndexReader,
 	chunkr *bucketChunkReader,
@@ -644,6 +646,9 @@ func blockSeries(
 	req *storepb.SeriesRequest,
 	samplesLimiter SampleLimiter,
 ) (storepb.SeriesSet, *queryStats, error) {
+	span, ctx := tracing.StartSpan(ctx, "blockSeries")
+	defer span.Finish()
+
 	ps, err := indexr.ExpandedPostings(matchers)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "expanded matching posting")
@@ -788,6 +793,43 @@ func populateChunk(out *storepb.AggrChunk, in chunkenc.Chunk, aggrs []storepb.Ag
 	return nil
 }
 
+func debugFoundBlockSetOverviewSpan(span opentracing.Span, mint, maxt, maxResolutionMillis int64, lset labels.Labels, bs []*bucketBlock) {
+	if len(bs) == 0 {
+		return
+	}
+
+	var (
+		parts            []string
+		currRes          = int64(-1)
+		currMin, currMax int64
+	)
+	for _, b := range bs {
+		if currRes == b.meta.Thanos.Downsample.Resolution {
+			currMax = b.meta.MaxTime
+			continue
+		}
+
+		if currRes != -1 {
+			parts = append(parts, fmt.Sprintf("Range: %d-%d Resolution: %d", currMin, currMax, currRes))
+		}
+
+		currRes = b.meta.Thanos.Downsample.Resolution
+		currMin = b.meta.MinTime
+		currMax = b.meta.MaxTime
+	}
+
+	parts = append(parts, fmt.Sprintf("Range: %d-%d Resolution: %d", currMin, currMax, currRes))
+	span.LogKV(
+		"msg", "Blocks source resolutions",
+		"blocks", len(bs),
+		"maximum_resolution", maxResolutionMillis,
+		"mint", mint,
+		"maxt", maxt,
+		"lset", lset.String(),
+		"parts", strings.Join(parts, "\n"),
+	)
+}
+
 // debugFoundBlockSetOverview logs on debug level what exactly blocks we used for query in terms of
 // labels and resolution. This is important because we allow mixed resolution results, so it is quite crucial
 // to be aware what exactly resolution we see on query.
@@ -825,8 +867,13 @@ func debugFoundBlockSetOverview(logger log.Logger, mint, maxt, maxResolutionMill
 
 // Series implements the storepb.StoreServer interface.
 func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_SeriesServer) (err error) {
+	seriesSpan, ctx := tracing.StartSpan(srv.Context(), "Series")
+	defer seriesSpan.Finish()
+
+	seriesSpan.SetTag("page.type", "thanos.query")
+
 	{
-		span, _ := tracing.StartSpan(srv.Context(), "store_query_gate_ismyturn")
+		span, _ := tracing.StartSpan(ctx, "store_query_gate_ismyturn")
 		err := s.queryGate.IsMyTurn(srv.Context())
 		span.Finish()
 		if err != nil {
@@ -843,12 +890,15 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 	req.MaxTime = s.limitMaxTime(req.MaxTime)
 
 	var (
-		stats  = &queryStats{}
-		res    []storepb.SeriesSet
-		mtx    sync.Mutex
-		g, ctx = errgroup.WithContext(srv.Context())
+		stats = &queryStats{}
+		res   []storepb.SeriesSet
+		mtx   sync.Mutex
+		g     *errgroup.Group
 	)
 
+	g, ctx = errgroup.WithContext(ctx)
+
+	span, _ := tracing.StartSpan(ctx, "bucket_store_preload_all")
 	s.mtx.RLock()
 
 	for _, bs := range s.blockSets {
@@ -867,6 +917,8 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 			debugFoundBlockSetOverview(s.logger, req.MinTime, req.MaxTime, req.MaxResolutionWindow, bs.labels, blocks)
 		}
 
+		debugFoundBlockSetOverviewSpan(span, req.MinTime, req.MaxTime, req.MaxResolutionWindow, bs.labels, blocks)
+
 		for _, b := range blocks {
 			b := b
 
@@ -880,6 +932,7 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 
 			g.Go(func() error {
 				part, pstats, err := blockSeries(
+					ctx,
 					b.meta.Thanos.Labels,
 					indexr,
 					chunkr,
@@ -902,8 +955,36 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 	}
 
 	s.mtx.RUnlock()
+	span.Finish()
 
 	defer func() {
+		seriesSpan.LogKV(
+			"blocksQueried", stats.blocksQueried,
+			"postingsTouched", stats.postingsTouched,
+			"postingsTouchedSizeSum", stats.postingsTouchedSizeSum,
+			"postingsToFetch", stats.postingsToFetch,
+			"postingsFetched", stats.postingsFetched,
+			"postingsFetchedSizeSum", stats.postingsFetchedSizeSum,
+			"postingsFetchCount", stats.postingsFetchCount,
+			"postingsFetchDurationSum", stats.postingsFetchDurationSum,
+			"seriesTouched", stats.seriesTouched,
+			"seriesTouchedSizeSum", stats.seriesTouchedSizeSum,
+			"seriesFetched", stats.seriesFetched,
+			"seriesFetchedSizeSum", stats.seriesFetchedSizeSum,
+			"seriesFetchCount", stats.seriesFetchCount,
+			"seriesFetchDurationSum", stats.seriesFetchDurationSum,
+			"chunksTouched", stats.chunksTouched,
+			"chunksTouchedSizeSum", stats.chunksTouchedSizeSum,
+			"chunksFetched", stats.chunksFetched,
+			"chunksFetchedSizeSum", stats.chunksFetchedSizeSum,
+			"chunksFetchCount", stats.chunksFetchCount,
+			"chunksFetchDurationSum", stats.chunksFetchDurationSum,
+			"getAllDuration", stats.getAllDuration,
+			"mergedSeriesCount", stats.mergedSeriesCount,
+			"mergedChunksCount", stats.mergedChunksCount,
+			"mergeDuration", stats.mergeDuration,
+		)
+
 		s.metrics.seriesDataTouched.WithLabelValues("postings").Observe(float64(stats.postingsTouched))
 		s.metrics.seriesDataFetched.WithLabelValues("postings").Observe(float64(stats.postingsFetched))
 		s.metrics.seriesDataSizeTouched.WithLabelValues("postings").Observe(float64(stats.postingsTouchedSizeSum))
@@ -924,10 +1005,9 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 
 	// Concurrently get data from all blocks.
 	{
-		span, _ := tracing.StartSpan(srv.Context(), "bucket_store_preload_all")
+
 		begin := time.Now()
 		err := g.Wait()
-		span.Finish()
 
 		if err != nil {
 			return status.Error(codes.Aborted, err.Error())
@@ -936,9 +1016,11 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 		s.metrics.seriesGetAllDuration.Observe(stats.getAllDuration.Seconds())
 		s.metrics.seriesBlocksQueried.Observe(float64(stats.blocksQueried))
 	}
+
 	// Merge the sub-results from each selected block.
 	{
-		span, _ := tracing.StartSpan(srv.Context(), "bucket_store_merge_all")
+
+		span, _ := tracing.StartSpan(ctx, "bucket_store_merge_all")
 		defer span.Finish()
 
 		begin := time.Now()
@@ -1213,7 +1295,7 @@ func newBucketBlock(
 ) (b *bucketBlock, err error) {
 	b = &bucketBlock{
 		logger:            logger,
-		bkt:               bkt,
+		bkt:               TraceBucketReader{bkt},
 		indexCache:        indexCache,
 		chunkPool:         chunkPool,
 		dir:               dir,
@@ -1238,11 +1320,23 @@ func (b *bucketBlock) indexFilename() string {
 }
 
 func (b *bucketBlock) readIndexRange(ctx context.Context, off, length int64) ([]byte, error) {
+	span, ctx := tracing.StartSpan(ctx, "readIndexRange")
+	defer span.Finish()
+
+	span.LogKV(
+		"file", b.indexFilename(),
+		"off", off,
+		"length", length,
+	)
+
 	r, err := b.bkt.GetRange(ctx, b.indexFilename(), off, length)
 	if err != nil {
 		return nil, errors.Wrap(err, "get range reader")
 	}
 	defer runutil.CloseWithLogOnErr(b.logger, r, "readIndexRange close range reader")
+
+	readSpan, _ := tracing.StartSpan(ctx, "read")
+	defer readSpan.Finish()
 
 	c, err := ioutil.ReadAll(r)
 	if err != nil {
@@ -1325,6 +1419,9 @@ func newBucketIndexReader(ctx context.Context, block *bucketBlock) *bucketIndexR
 // chunk where the series contains the matching label-value pair for a given block of data. Postings can be fetched by
 // single label name=value.
 func (r *bucketIndexReader) ExpandedPostings(ms []*labels.Matcher) ([]uint64, error) {
+	span, ctx := tracing.StartSpan(r.ctx, "expandedPostings")
+	defer span.Finish()
+
 	var postingGroups []*postingGroup
 
 	// NOTE: Derived from tsdb.PostingsForMatchers.
@@ -1342,7 +1439,7 @@ func (r *bucketIndexReader) ExpandedPostings(ms []*labels.Matcher) ([]uint64, er
 		return nil, nil
 	}
 
-	if err := r.fetchPostings(postingGroups); err != nil {
+	if err := r.fetchPostings(ctx, postingGroups); err != nil {
 		return nil, errors.Wrap(err, "get postings")
 	}
 
@@ -1466,7 +1563,10 @@ type postingPtr struct {
 }
 
 // fetchPostings fill postings requested by posting groups.
-func (r *bucketIndexReader) fetchPostings(groups []*postingGroup) error {
+func (r *bucketIndexReader) fetchPostings(ctx context.Context, groups []*postingGroup) error {
+	span, ctx := tracing.StartSpan(ctx, "fetchPostings")
+	defer span.Finish()
+
 	var ptrs []postingPtr
 
 	// Fetch postings from the cache with a single call.
@@ -1475,7 +1575,7 @@ func (r *bucketIndexReader) fetchPostings(groups []*postingGroup) error {
 		keys = append(keys, g.keys...)
 	}
 
-	fromCache, _ := r.block.indexCache.FetchMultiPostings(r.ctx, r.block.meta.ULID, keys)
+	fromCache, _ := r.block.indexCache.FetchMultiPostings(ctx, r.block.meta.ULID, keys)
 
 	// Iterate over all groups and fetch posting from cache.
 	// If we have a miss, mark key to be fetched in `ptrs` slice.
@@ -1513,6 +1613,11 @@ func (r *bucketIndexReader) fetchPostings(groups []*postingGroup) error {
 		}
 	}
 
+	span.LogKV(
+		"cached", len(fromCache),
+		"missed", len(ptrs),
+	)
+
 	sort.Slice(ptrs, func(i, j int) bool {
 		return ptrs[i].ptr.Start < ptrs[j].ptr.Start
 	})
@@ -1523,7 +1628,7 @@ func (r *bucketIndexReader) fetchPostings(groups []*postingGroup) error {
 		return uint64(ptrs[i].ptr.Start), uint64(ptrs[i].ptr.End)
 	})
 
-	g, ctx := errgroup.WithContext(r.ctx)
+	g, ctx := errgroup.WithContext(ctx)
 	for _, part := range parts {
 		i, j := part.elemRng[0], part.elemRng[1]
 
@@ -1559,7 +1664,7 @@ func (r *bucketIndexReader) fetchPostings(groups []*postingGroup) error {
 				// Return postings and fill LRU cache.
 				// Truncate first 4 bytes which are length of posting.
 				groups[p.groupID].Fill(p.keyID, newBigEndianPostings(pBytes[4:]))
-				r.block.indexCache.StorePostings(r.ctx, r.block.meta.ULID, groups[p.groupID].keys[p.keyID], pBytes)
+				r.block.indexCache.StorePostings(ctx, r.block.meta.ULID, groups[p.groupID].keys[p.keyID], pBytes)
 
 				// If we just fetched it we still have to update the stats for touched postings.
 				r.stats.postingsTouched++
@@ -1638,9 +1743,16 @@ func (it *bigEndianPostings) Err() error {
 }
 
 func (r *bucketIndexReader) PreloadSeries(ids []uint64) error {
+	span, ctx := tracing.StartSpan(r.ctx, "preloadSeries")
+	defer span.Finish()
+
+	span.LogKV("ids", ids)
+
+	const maxSeriesSize = 64 * 1024
+
 	// Load series from cache, overwriting the list of ids to preload
 	// with the missing ones.
-	fromCache, ids := r.block.indexCache.FetchMultiSeries(r.ctx, r.block.meta.ULID, ids)
+	fromCache, ids := r.block.indexCache.FetchMultiSeries(ctx, r.block.meta.ULID, ids)
 	for id, b := range fromCache {
 		r.loadedSeries[id] = b
 	}
@@ -1648,7 +1760,12 @@ func (r *bucketIndexReader) PreloadSeries(ids []uint64) error {
 	parts := r.block.partitioner.Partition(len(ids), func(i int) (start, end uint64) {
 		return ids[i], ids[i] + maxSeriesSize
 	})
-	g, ctx := errgroup.WithContext(r.ctx)
+
+	span.LogKV(
+		"parts", len(parts),
+	)
+
+	g, ctx := errgroup.WithContext(ctx)
 	for _, p := range parts {
 		s, e := p.start, p.end
 		i, j := p.elemRng[0], p.elemRng[1]
@@ -1661,6 +1778,14 @@ func (r *bucketIndexReader) PreloadSeries(ids []uint64) error {
 }
 
 func (r *bucketIndexReader) loadSeries(ctx context.Context, ids []uint64, refetch bool, start, end uint64) error {
+	span, ctx := tracing.StartSpan(ctx, "loadSeries")
+	defer span.Finish()
+
+	span.LogKV(
+		"ids", ids,
+		"start", start,
+		"end", end,
+	)
 	begin := time.Now()
 
 	b, err := r.block.readIndexRange(ctx, int64(start), int64(end-start))
@@ -1697,7 +1822,7 @@ func (r *bucketIndexReader) loadSeries(ctx context.Context, ids []uint64, refetc
 		c = c[n : n+int(l)]
 		r.mtx.Lock()
 		r.loadedSeries[id] = c
-		r.block.indexCache.StoreSeries(r.ctx, r.block.meta.ULID, id, c)
+		r.block.indexCache.StoreSeries(ctx, r.block.meta.ULID, id, c)
 		r.mtx.Unlock()
 	}
 	return nil
@@ -1812,7 +1937,10 @@ func (r *bucketChunkReader) addPreload(id uint64) error {
 
 // preload all added chunk IDs. Must be called before the first call to Chunk is made.
 func (r *bucketChunkReader) preload(samplesLimiter SampleLimiter) error {
-	g, ctx := errgroup.WithContext(r.ctx)
+	span, ctx := tracing.StartSpan(r.ctx, "PreloadChunks")
+	defer span.Finish()
+
+	g, ctx := errgroup.WithContext(ctx)
 
 	numChunks := uint64(0)
 	for _, offsets := range r.preloads {
@@ -1848,6 +1976,9 @@ func (r *bucketChunkReader) preload(samplesLimiter SampleLimiter) error {
 }
 
 func (r *bucketChunkReader) loadChunks(ctx context.Context, offs []uint32, seq int, start, end uint32) error {
+	span, ctx := tracing.StartSpan(ctx, "loadChunks")
+	defer span.Finish()
+
 	begin := time.Now()
 
 	b, err := r.block.readChunkRange(ctx, seq, int64(start), int64(end-start))
@@ -1987,4 +2118,16 @@ func (s queryStats) merge(o *queryStats) *queryStats {
 	s.mergeDuration += o.mergeDuration
 
 	return &s
+}
+
+type traceReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (tr traceReader) Read(b []byte) (n int, err error) {
+	span, _ := tracing.StartSpan(tr.ctx, "read")
+	defer span.Finish()
+
+	return tr.r.Read(b)
 }
