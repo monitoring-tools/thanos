@@ -1623,8 +1623,6 @@ func (r *bucketIndexReader) PreloadSeries(ids []uint64) error {
 	span, ctx := tracing.StartSpan(r.ctx, "preloadSeries")
 	defer span.Finish()
 
-	span.LogKV("ids", ids)
-
 	const maxSeriesSize = 64 * 1024
 
 	// Load series from cache, overwriting the list of ids to preload
