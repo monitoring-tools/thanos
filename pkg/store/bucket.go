@@ -1657,7 +1657,7 @@ func (r *bucketIndexReader) loadSeries(ctx context.Context, ids []uint64, start,
 	defer span.Finish()
 
 	span.LogKV(
-		"ids", ids,
+		"ids", len(ids),
 		"start", start,
 		"end", end,
 	)
