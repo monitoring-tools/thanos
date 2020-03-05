@@ -23,7 +23,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/component"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/thanos-io/thanos/pkg/strutil"
-	"github.com/thanos-io/thanos/pkg/tracing"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -60,17 +59,17 @@ const WITH_PAYLOAD_LABEL = "with_payload"
 const WITHOUT_PAYLOAD_LABEL = "without_payload"
 
 type firstRecvMetrics struct {
-	withPayload    prometheus.Observer
-	withoutPayload prometheus.Observer
-	frameTimeoutCount   prometheus.Counter
-	queryTimeoutCount   prometheus.Counter
+	withPayload       prometheus.Observer
+	withoutPayload    prometheus.Observer
+	frameTimeoutCount prometheus.Counter
+	queryTimeoutCount prometheus.Counter
 }
 
 type proxyStoreMetrics struct {
-	emptyStreamResponses prometheus.Counter
-	firstRecvDuration    *prometheus.HistogramVec
-	frameTimeoutRecvCount     *prometheus.CounterVec
-	queryTimeoutRecvCount     *prometheus.CounterVec
+	emptyStreamResponses  prometheus.Counter
+	firstRecvDuration     *prometheus.HistogramVec
+	frameTimeoutRecvCount *prometheus.CounterVec
+	queryTimeoutRecvCount *prometheus.CounterVec
 }
 
 func newProxyStoreMetrics(reg prometheus.Registerer) *proxyStoreMetrics {
@@ -82,8 +81,8 @@ func newProxyStoreMetrics(reg prometheus.Registerer) *proxyStoreMetrics {
 	})
 
 	m.firstRecvDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:       "thanos_proxy_time_to_first_byte_seconds",
-		Help:       "Time to get first part data from store.",
+		Name:    "thanos_proxy_time_to_first_byte_seconds",
+		Help:    "Time to get first part data from store.",
 		Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
 	}, []string{"store", "payload"})
 
@@ -281,10 +280,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// We might be able to skip the store if its meta information indicates
 			// it cannot have series matching our query.
 			// NOTE: all matchers are validated in matchesExternalLabels method so we explicitly ignore error.
-			spanStoreMathes, gctx := tracing.StartSpan(gctx, "store_matches")
-			ok, _ := storeMatches(st, r.MinTime, r.MaxTime, r.Matchers...)
-			spanStoreMathes.Finish()
-			if !ok {
+			if ok, _ := storeMatches(st, r.MinTime, r.MaxTime, r.Matchers...); !ok {
 				storeDebugMsgs = append(storeDebugMsgs, fmt.Sprintf("store %s filtered out", st))
 				continue
 			}
@@ -313,10 +309,10 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			}
 
 			metrics := &firstRecvMetrics{
-				withoutPayload:       s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITHOUT_PAYLOAD_LABEL),
-				withPayload:          s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITH_PAYLOAD_LABEL),
-				frameTimeoutCount:         s.metrics.frameTimeoutRecvCount.WithLabelValues(st.Addr()),
-				queryTimeoutCount:         s.metrics.queryTimeoutRecvCount.WithLabelValues(st.Addr()),
+				withoutPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITHOUT_PAYLOAD_LABEL),
+				withPayload:       s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITH_PAYLOAD_LABEL),
+				frameTimeoutCount: s.metrics.frameTimeoutRecvCount.WithLabelValues(st.Addr()),
+				queryTimeoutCount: s.metrics.queryTimeoutRecvCount.WithLabelValues(st.Addr()),
 			}
 
 			// Schedule streamSeriesSet that translates gRPC streamed response
