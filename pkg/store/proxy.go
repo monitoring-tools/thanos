@@ -418,8 +418,6 @@ func startStreamSeriesSet(
 		responseTimeout: responseTimeout,
 	}
 
-	span := opentracing.SpanFromContext(ctx)
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -438,10 +436,6 @@ func startStreamSeriesSet(
 			t0 := time.Now()
 			for {
 				r, err := s.stream.Recv()
-				span.LogKV(
-					"message", "series received",
-					"name", name,
-				)
 				select {
 				case <-done:
 					close(rCh)
