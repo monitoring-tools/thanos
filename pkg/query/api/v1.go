@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/timestamp"
+	ptime "github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
 	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
@@ -110,6 +111,42 @@ type API struct {
 	defaultInstantQueryMaxSourceResolution time.Duration
 
 	now func() time.Time
+
+	metrics *queryAPIMetrics
+}
+
+type queryAPIMetrics struct {
+	requestTimeRange prometheus.Histogram
+	responseDurationByTimeRanges *prometheus.HistogramVec
+}
+
+func newQueryAPIMetrics(reg prometheus.Registerer) *queryAPIMetrics {
+	var m queryAPIMetrics
+
+	m.requestTimeRange = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "thanos_query_api_request_timerange_seconds",
+			Help:    "Requested timeranges(seconds).",
+			Buckets: prometheus.ExponentialBuckets(3600, 2, 12),
+		},
+	)
+
+	m.responseDurationByTimeRanges = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "thanos_query_api_response_duration_by_timerange_seconds",
+			Help:    "Requested timeranges(seconds).",
+			Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
+		},
+		[]string{"time_range"},
+	)
+
+	if reg != nil {
+		reg.MustRegister(
+			m.requestTimeRange,
+			m.responseDurationByTimeRanges,
+		)
+	}
+	return &m
 }
 
 // NewAPI returns an initialized API type.
@@ -123,6 +160,9 @@ func NewAPI(
 	replicaLabels []string,
 	defaultInstantQueryMaxSourceResolution time.Duration,
 ) *API {
+
+	metrics := newQueryAPIMetrics(reg)
+
 	return &API{
 		logger:                                 logger,
 		queryEngine:                            qe,
@@ -133,7 +173,8 @@ func NewAPI(
 		reg:                                    reg,
 		defaultInstantQueryMaxSourceResolution: defaultInstantQueryMaxSourceResolution,
 
-		now: time.Now,
+		now:     time.Now,
+		metrics: metrics,
 	}
 }
 
@@ -142,6 +183,18 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 	instr := func(name string, f ApiFunc) http.HandlerFunc {
 		hf := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			SetCORS(w)
+
+			var timerange float64
+			start, err := parseTime(r.FormValue("start"))
+			if err == nil {
+				end, err := parseTime(r.FormValue("end"))
+				if err == nil {
+					timerange = end.Sub(start).Seconds()
+					api.metrics.requestTimeRange.Observe(timerange)
+				}
+			}
+
+			start = time.Now()
 			if data, warnings, err := f(r); err != nil {
 				RespondError(w, err, data)
 			} else if data != nil {
@@ -149,6 +202,25 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 			} else {
 				w.WriteHeader(http.StatusNoContent)
 			}
+			elapsedTime := time.Now().Sub(start)
+			b := prometheus.ExponentialBuckets(3600, 2, 12)
+
+			label := "0h"
+			if timerange > 0 {
+				for i, v := range b {
+					if timerange <= v {
+						d, _ := ptime.ParseDuration(fmt.Sprintf("%.0fs", v))
+						label = d.String()
+						break
+					} else {
+						if i == (len(b)-1) {
+							label = "+Inf"
+						}
+					}
+				}
+			}
+
+			api.metrics.responseDurationByTimeRanges.WithLabelValues(label).Observe(elapsedTime.Seconds())
 		})
 		return ins.NewHandler(name, tracing.HTTPMiddleware(tracer, name, logger, gziphandler.GzipHandler(hf)))
 	}
