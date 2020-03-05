@@ -433,6 +433,7 @@ func startStreamSeriesSet(
 		rCh := make(chan *recvResponse)
 		done := make(chan struct{})
 		go func() {
+			t0 := time.Now()
 			for {
 				r, err := s.stream.Recv()
 				select {
@@ -440,6 +441,13 @@ func startStreamSeriesSet(
 					close(rCh)
 					return
 				case rCh <- &recvResponse{r: r, err: err}:
+					if numResponses == 0 {
+						if r.Size() > 0 {
+							metrics.withPayload.Observe(time.Since(t0).Seconds())
+						} else {
+							metrics.withoutPayload.Observe(time.Since(t0).Seconds())
+						}
+					}
 				}
 			}
 		}()
@@ -449,9 +457,11 @@ func startStreamSeriesSet(
 			var rr *recvResponse
 			select {
 			case <-ctx.Done():
+				metrics.queryTimeoutCount.Inc()
 				s.handleErr(errors.Wrapf(ctx.Err(), "failed to receive any data from %s", s.name), done)
 				return
 			case <-frameTimeoutCtx.Done():
+				metrics.frameTimeoutCount.Inc()
 				s.handleErr(errors.Wrapf(frameTimeoutCtx.Err(), "failed to receive any data in %s from %s", s.responseTimeout.String(), s.name), done)
 				return
 			case rr = <-rCh:
