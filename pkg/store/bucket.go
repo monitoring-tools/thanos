@@ -926,6 +926,12 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 
 	defer func() {
 		seriesSpan.LogKV(
+			"fetchedTotal", fmt.Sprintf(
+				"%v. (postings: %v, series: %v)",
+				ByteCountIEC(int64(stats.postingsFetchedSizeSum+stats.seriesFetchedSizeSum)),
+				ByteCountIEC(int64(stats.postingsFetchedSizeSum)),
+				ByteCountIEC(int64(stats.seriesFetchedSizeSum)),
+			),
 			"blocksQueried", stats.blocksQueried,
 			"postingsTouched", stats.postingsTouched,
 			"postingsTouchedSizeSum", stats.postingsTouchedSizeSum,
