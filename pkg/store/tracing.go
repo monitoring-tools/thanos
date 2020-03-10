@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -44,6 +45,7 @@ func (tbr TraceBucketReader) GetRange(ctx context.Context, name string, off, len
 		"name", name,
 		"off", off,
 		"length", length,
+		"length_human", ByteCountIEC(length),
 	)
 
 	return tbr.br.GetRange(ctx, name, off, length)
@@ -63,4 +65,18 @@ func (tbr TraceBucketReader) IsObjNotFoundErr(err error) bool {
 // ObjectSize returns the size of the specified object.
 func (tbr TraceBucketReader) ObjectSize(ctx context.Context, name string) (uint64, error) {
 	return tbr.br.ObjectSize(ctx, name)
+}
+
+func ByteCountIEC(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB",
+		float64(b)/float64(div), "KMGTPE"[exp])
 }

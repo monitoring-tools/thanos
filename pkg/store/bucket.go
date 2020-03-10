@@ -616,7 +616,7 @@ func blockSeries(
 
 	span.SetTag("ulid", ulid)
 
-	ps, err := indexr.ExpandedPostings(matchers)
+	ps, err := indexr.ExpandedPostings(ctx, matchers)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "expanded matching posting")
 	}
@@ -628,7 +628,7 @@ func blockSeries(
 	// Preload all series index data.
 	// TODO(bwplotka): Consider not keeping all series in memory all the time.
 	// TODO(bwplotka): Do lazy loading in one step as `ExpandingPostings` method.
-	if err := indexr.PreloadSeries(ps); err != nil {
+	if err := indexr.PreloadSeries(ctx, ps); err != nil {
 		return nil, nil, errors.Wrap(err, "preload series")
 	}
 
@@ -692,7 +692,7 @@ func blockSeries(
 	}
 
 	// Preload all chunks that were marked in the previous stage.
-	if err := chunkr.preload(samplesLimiter); err != nil {
+	if err := chunkr.preload(ctx, samplesLimiter); err != nil {
 		return nil, nil, errors.Wrap(err, "preload chunks")
 	}
 
@@ -1379,8 +1379,8 @@ func newBucketIndexReader(ctx context.Context, logger log.Logger, block *bucketB
 // Reminder: A posting is a reference (represented as a uint64) to a series reference, which in turn points to the first
 // chunk where the series contains the matching label-value pair for a given block of data. Postings can be fetched by
 // single label name=value.
-func (r *bucketIndexReader) ExpandedPostings(ms []*labels.Matcher) ([]uint64, error) {
-	span, ctx := tracing.StartSpan(r.ctx, "expandedPostings")
+func (r *bucketIndexReader) ExpandedPostings(ctx context.Context, ms []*labels.Matcher) ([]uint64, error) {
+	span, ctx := tracing.StartSpan(ctx, "expandedPostings")
 	defer span.Finish()
 
 	var postingGroups []*postingGroup
@@ -1556,8 +1556,8 @@ func (r *bucketIndexReader) fetchPostings(ctx context.Context, groups []*posting
 	}
 
 	span.LogKV(
-		"cached", len(fromCache),
-		"missed", len(ptrs),
+		"cache_hit", len(fromCache),
+		"cache_miss", len(ptrs),
 	)
 
 	sort.Slice(ptrs, func(i, j int) bool {
@@ -1619,8 +1619,8 @@ func (r *bucketIndexReader) fetchPostings(ctx context.Context, groups []*posting
 	return g.Wait()
 }
 
-func (r *bucketIndexReader) PreloadSeries(ids []uint64) error {
-	span, ctx := tracing.StartSpan(r.ctx, "preloadSeries")
+func (r *bucketIndexReader) PreloadSeries(ctx context.Context, ids []uint64) error {
+	span, ctx := tracing.StartSpan(ctx, "preloadSeries")
 	defer span.Finish()
 
 	const maxSeriesSize = 64 * 1024
@@ -1802,8 +1802,8 @@ func (r *bucketChunkReader) addPreload(id uint64) error {
 }
 
 // preload all added chunk IDs. Must be called before the first call to Chunk is made.
-func (r *bucketChunkReader) preload(samplesLimiter *Limiter) error {
-	span, ctx := tracing.StartSpan(r.ctx, "PreloadChunks")
+func (r *bucketChunkReader) preload(ctx context.Context, samplesLimiter *Limiter) error {
+	span, ctx := tracing.StartSpan(ctx, "PreloadChunks")
 	defer span.Finish()
 
 	g, ctx := errgroup.WithContext(ctx)
