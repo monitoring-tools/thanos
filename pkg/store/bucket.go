@@ -994,15 +994,18 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 	// Merge the sub-results from each selected block.
 	{
 
-		span, _ := tracing.StartSpan(ctx, "bucket_store_merge_all")
-		defer span.Finish()
-
 		begin := time.Now()
 
 		// Merge series set into an union of all block sets. This exposes all blocks are single seriesSet.
 		// Chunks of returned series might be out of order w.r.t to their time range.
 		// This must be accounted for later by clients.
+		span, _ := tracing.StartSpan(ctx, "bucket_store_merge_all")
 		set := storepb.MergeSeriesSets(res...)
+		span.Finish()
+
+		span, _ = tracing.StartSpan(ctx, "send_response")
+		defer span.Finish()
+
 		for set.Next() {
 			var series storepb.Series
 
