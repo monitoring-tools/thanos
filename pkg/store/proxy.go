@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"fmt"
+	ptime "github.com/prometheus/common/model"
 	"io"
 	"math"
 	"sort"
@@ -61,15 +62,15 @@ const WITHOUT_PAYLOAD_LABEL = "without_payload"
 type firstRecvMetrics struct {
 	withPayload       prometheus.Observer
 	withoutPayload    prometheus.Observer
-	frameTimeoutCount prometheus.Counter
-	queryTimeoutCount prometheus.Counter
+	frameTimeoutCount prometheus.Observer
+	queryTimeoutCount prometheus.Observer
 }
 
 type proxyStoreMetrics struct {
 	emptyStreamResponses  prometheus.Counter
 	firstRecvDuration     *prometheus.HistogramVec
-	frameTimeoutRecvCount *prometheus.CounterVec
-	queryTimeoutRecvCount *prometheus.CounterVec
+	frameTimeoutRecvCount *prometheus.HistogramVec
+	queryTimeoutRecvCount *prometheus.HistogramVec
 }
 
 func newProxyStoreMetrics(reg prometheus.Registerer) *proxyStoreMetrics {
@@ -84,16 +85,18 @@ func newProxyStoreMetrics(reg prometheus.Registerer) *proxyStoreMetrics {
 		Name:    "thanos_proxy_time_to_first_byte_seconds",
 		Help:    "Time to get first part data from store.",
 		Buckets: []float64{0.001, 0.01, 0.1, 0.3, 0.6, 1, 3, 6, 9, 20, 30, 60, 90, 120},
-	}, []string{"store", "payload"})
+	}, []string{"store", "payload", "time_range"})
 
-	m.frameTimeoutRecvCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.frameTimeoutRecvCount = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "thanos_proxy_frame_timeouted_requests_count",
-		Help: "Frame timeout recv count.",
+		Help: "Frame timeouted request count by time ranges.",
+		Buckets: prometheus.ExponentialBuckets(3600, 2, 12),
 	}, []string{"store"})
 
-	m.queryTimeoutRecvCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.queryTimeoutRecvCount = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "thanos_proxy_query_timeouted_requests_count",
-		Help: "Query timeout recv count.",
+		Help: "Query timeouted request count by time tanges.",
+		Buckets: prometheus.ExponentialBuckets(3600, 2, 12),
 	}, []string{"store"})
 
 	if reg != nil {
@@ -294,6 +297,24 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			defer closeSeries()
 
 			sc, err := st.Series(seriesCtx, r)
+			queryRange := time.Duration((r.MaxTime - r.MinTime)*1000).Seconds();
+
+			b := prometheus.ExponentialBuckets(3600, 2, 12)
+			rangelabel := "0h"
+			if queryRange > 0 {
+				for i, v := range b {
+					if queryRange <= v {
+						d, _ := ptime.ParseDuration(fmt.Sprintf("%.0fs", v))
+						rangelabel = d.String()
+						break
+					} else {
+						if i == (len(b) - 1) {
+							rangelabel = "+Inf"
+						}
+					}
+				}
+			}
+
 			if err != nil {
 				storeID := storepb.LabelSetsToString(st.LabelSets())
 				if storeID == "" {
@@ -309,8 +330,8 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			}
 
 			metrics := &firstRecvMetrics{
-				withoutPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITHOUT_PAYLOAD_LABEL),
-				withPayload:       s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITH_PAYLOAD_LABEL),
+				withoutPayload:    s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITHOUT_PAYLOAD_LABEL, rangelabel),
+				withPayload:       s.metrics.firstRecvDuration.WithLabelValues(st.Addr(), WITH_PAYLOAD_LABEL, rangelabel),
 				frameTimeoutCount: s.metrics.frameTimeoutRecvCount.WithLabelValues(st.Addr()),
 				queryTimeoutCount: s.metrics.queryTimeoutRecvCount.WithLabelValues(st.Addr()),
 			}
@@ -318,7 +339,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics.emptyStreamResponses, metrics))
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics.emptyStreamResponses, metrics, queryRange))
 		}
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
@@ -405,6 +426,7 @@ func startStreamSeriesSet(
 	responseTimeout time.Duration,
 	emptyStreamResponses prometheus.Counter,
 	metrics *firstRecvMetrics,
+	queryRange float64,
 ) *streamSeriesSet {
 	s := &streamSeriesSet{
 		ctx:             ctx,
@@ -457,11 +479,11 @@ func startStreamSeriesSet(
 			var rr *recvResponse
 			select {
 			case <-ctx.Done():
-				metrics.queryTimeoutCount.Inc()
+				metrics.queryTimeoutCount.Observe(queryRange);
 				s.handleErr(errors.Wrapf(ctx.Err(), "failed to receive any data from %s", s.name), done)
 				return
 			case <-frameTimeoutCtx.Done():
-				metrics.frameTimeoutCount.Inc()
+				metrics.frameTimeoutCount.Observe(queryRange);
 				s.handleErr(errors.Wrapf(frameTimeoutCtx.Err(), "failed to receive any data in %s from %s", s.responseTimeout.String(), s.name), done)
 				return
 			case rr = <-rCh:
