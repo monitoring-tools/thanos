@@ -297,7 +297,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			defer closeSeries()
 
 			sc, err := st.Series(seriesCtx, r)
-			queryRange := time.Duration((r.MaxTime - r.MinTime)*1000).Seconds();
+			queryRange := time.Duration((r.MaxTime - r.MinTime)*1000000).Seconds() - 300;
 
 			b := prometheus.ExponentialBuckets(3600, 2, 12)
 			rangelabel := "0h"
