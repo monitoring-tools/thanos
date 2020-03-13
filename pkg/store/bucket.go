@@ -1327,7 +1327,17 @@ func (b *bucketBlock) readChunkRange(ctx context.Context, seq int, off, length i
 	}
 	defer runutil.CloseWithLogOnErr(b.logger, r, "readChunkRange close range reader")
 
-	if _, err = io.Copy(buf, r); err != nil {
+	start := time.Now()
+	span, _ := tracing.StartSpan(ctx, "readChunkRange")
+	defer span.Finish()
+
+	if n, err := io.Copy(buf, r); err != nil {
+		elapsed := time.Since(start)
+		span.LogKV(
+			"read bytes", ByteCountIEC(int64(n)),
+			"speed", float64(n/1024/1024)/elapsed.Seconds(),
+		)
+
 		b.chunkPool.Put(c)
 		return nil, errors.Wrap(err, "read range")
 	}
