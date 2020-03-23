@@ -838,6 +838,7 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 	defer seriesSpan.Finish()
 
 	seriesSpan.SetTag("page.type", "thanos.query")
+	seriesSpan.LogKV("request", req)
 
 	{
 		span, _ := tracing.StartSpan(ctx, "store_query_gate_ismyturn")
