@@ -50,3 +50,4 @@ func StartSpan(ctx context.Context, operationName string, opts ...opentracing.St
 	span = tracer.StartSpan(operationName, opts...)
 	return span, opentracing.ContextWithSpan(ctx, span)
 }
+

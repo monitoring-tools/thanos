@@ -835,10 +835,12 @@ func debugFoundBlockSetOverview(logger log.Logger, mint, maxt, maxResolutionMill
 // Series implements the storepb.StoreServer interface.
 func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_SeriesServer) (err error) {
 	seriesSpan, ctx := tracing.StartSpan(srv.Context(), "Series")
-	defer seriesSpan.Finish()
+	srv, reportFn := tracing.NewSeriesServer(srv, req, seriesSpan)
 
-	seriesSpan.SetTag("page.type", "thanos.query")
-	seriesSpan.LogKV("request", req)
+	defer func() {
+		reportFn()
+		seriesSpan.Finish()
+	}()
 
 	{
 		span, _ := tracing.StartSpan(ctx, "store_query_gate_ismyturn")

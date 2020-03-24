@@ -34,10 +34,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	ptime "github.com/prometheus/common/model"
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/timestamp"
-	ptime "github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
 	extpromhttp "github.com/thanos-io/thanos/pkg/extprom/http"
@@ -116,7 +116,7 @@ type API struct {
 }
 
 type queryAPIMetrics struct {
-	requestTimeRange prometheus.Histogram
+	requestTimeRange             prometheus.Histogram
 	responseDurationByTimeRanges *prometheus.HistogramVec
 }
 
@@ -213,7 +213,7 @@ func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.
 						label = d.String()
 						break
 					} else {
-						if i == (len(b)-1) {
+						if i == (len(b) - 1) {
 							label = "+Inf"
 						}
 					}
