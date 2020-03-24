@@ -143,6 +143,14 @@ func (p *PrometheusStore) putBuffer(b *[]byte) {
 
 // Series returns all series for a requested time range and label matcher.
 func (p *PrometheusStore) Series(r *storepb.SeriesRequest, s storepb.Store_SeriesServer) error {
+	seriesSpan, ctx := tracing.StartSpan(s.Context(), "Series")
+	s, reportFn := tracing.NewSeriesServer(s, r, seriesSpan)
+
+	defer func() {
+		reportFn()
+		seriesSpan.Finish()
+	}()
+
 	externalLabels := p.externalLabels()
 
 	match, newMatchers, err := matchesExternalLabels(r.Matchers, externalLabels)
