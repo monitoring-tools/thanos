@@ -9,6 +9,7 @@ import (
 	ptime "github.com/prometheus/common/model"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -301,8 +302,16 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 
 			b := prometheus.ExponentialBuckets(3600, 2, 12)
 			rangelabel := "0h"
+			timeout := s.responseTimeout
+			var dynamicTimeouts []string
+			if timeouts := os.Getenv("THANOS_DYNAMIC_TIMEOUTS");  timeouts!= "" {
+				dynamicTimeouts = strings.Split(timeouts, ",")
+			}
 			if queryRange > 0 {
 				for i, v := range b {
+					if timeout, err = time.ParseDuration(dynamicTimeouts[i]); err != nil {
+						timeout = s.responseTimeout
+					}
 					if queryRange <= v {
 						d, _ := ptime.ParseDuration(fmt.Sprintf("%.0fs", v))
 						rangelabel = d.String()
@@ -339,7 +348,7 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 			// Schedule streamSeriesSet that translates gRPC streamed response
 			// into seriesSet (if series) or respCh if warnings.
 			seriesSet = append(seriesSet, startStreamSeriesSet(seriesCtx, s.logger, closeSeries,
-				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, s.responseTimeout, s.metrics.emptyStreamResponses, metrics, queryRange))
+				wg, sc, respSender, st.String(), !r.PartialResponseDisabled, timeout, s.metrics.emptyStreamResponses, metrics, queryRange))
 		}
 
 		level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
