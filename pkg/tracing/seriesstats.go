@@ -11,14 +11,15 @@ import (
 type SeriesStats struct {
 	span opentracing.Span
 
-	mu        sync.RWMutex
-	firstSent bool
-	Raw       int64
-	Count     int64
-	Sum       int64
-	Min       int64
-	Max       int64
-	Counter   int64
+	mu         sync.RWMutex
+	firstSent  bool
+	seriesSent int64
+	Raw        int64
+	Count      int64
+	Sum        int64
+	Min        int64
+	Max        int64
+	Counter    int64
 }
 
 func NewSeriesStats(s opentracing.Span) *SeriesStats {
@@ -47,6 +48,8 @@ func (ss *SeriesStats) Observe(s storepb.Series) {
 		ss.span.LogEvent("first series sent")
 		ss.firstSent = true
 	}
+
+	ss.seriesSent++
 
 	for _, chunk := range s.Chunks {
 		if chunk.Raw != nil {
@@ -87,6 +90,7 @@ func (ss *SeriesStats) Report() {
 		"min_aggr_sent", ByteCountIEC(ss.Min),
 		"max_aggr_sent", ByteCountIEC(ss.Max),
 		"counter_aggr_sent", ByteCountIEC(ss.Counter),
+		"series_sent", ss.seriesSent,
 	)
 }
 

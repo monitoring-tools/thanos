@@ -446,16 +446,22 @@ func (p *PrometheusStore) startPromSeries(ctx context.Context, q *prompb.Query) 
 	preq.Header.Add("Content-Encoding", "snappy")
 	preq.Header.Set("Content-Type", "application/x-stream-protobuf")
 	preq.Header.Set("User-Agent", userAgent)
-	spanReqDo, ctx := tracing.StartSpan(ctx, "query_prometheus_request")
+	span, ctx := tracing.StartSpan(ctx, "query_prometheus_request")
+	defer span.Finish()
 	preq = preq.WithContext(ctx)
 	presp, err := p.client.Do(preq)
 	if err != nil {
 		return nil, errors.Wrap(err, "send request")
 	}
-	spanReqDo.Finish()
+
 	if presp.StatusCode/100 != 2 {
 		// Best effort read.
 		b, err := ioutil.ReadAll(presp.Body)
+		span.LogKV(
+			"event", "read finished",
+			"size", len(b),
+			"size_human", tracing.ByteCountIEC(int64(len(b))),
+		)
 		if err != nil {
 			level.Error(p.logger).Log("msg", "failed to read response from non 2XX remote read request", "err", err)
 		}
