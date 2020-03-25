@@ -187,8 +187,9 @@ func Exists(ctx context.Context, bkt Bucket, src string) (bool, error) {
 
 // BucketWithMetrics takes a bucket and registers metrics with the given registry for
 // operations run against the bucket.
-func BucketWithMetrics(name string, b Bucket, r prometheus.Registerer) Bucket {
+func BucketWithMetrics(name string, b Bucket, r prometheus.Registerer, logger log.Logger) Bucket {
 	bkt := &metricBucket{
+		logger: logger,
 		bkt: b,
 
 		ops: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -222,6 +223,7 @@ func BucketWithMetrics(name string, b Bucket, r prometheus.Registerer) Bucket {
 
 type metricBucket struct {
 	bkt Bucket
+	logger log.Logger
 
 	ops                       *prometheus.CounterVec
 	opsFailures               *prometheus.CounterVec
@@ -235,6 +237,7 @@ func (b *metricBucket) Iter(ctx context.Context, dir string, f func(name string)
 	err := b.bkt.Iter(ctx, dir, f)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation Iter failed", "err", err)
 	}
 	b.ops.WithLabelValues(op).Inc()
 
@@ -250,6 +253,7 @@ func (b *metricBucket) ObjectSize(ctx context.Context, name string) (uint64, err
 	rc, err := b.bkt.ObjectSize(ctx, name)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation ObjectSize failed", "err", err)
 		return 0, err
 	}
 	b.opsDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
@@ -263,6 +267,7 @@ func (b *metricBucket) Get(ctx context.Context, name string) (io.ReadCloser, err
 	rc, err := b.bkt.Get(ctx, name)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation Get failed", "err", err)
 		return nil, err
 	}
 	rc = newTimingReadCloser(
@@ -282,6 +287,7 @@ func (b *metricBucket) GetRange(ctx context.Context, name string, off, length in
 	rc, err := b.bkt.GetRange(ctx, name, off, length)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation GetRange failed", "err", err)
 		return nil, err
 	}
 	rc = newTimingReadCloser(
@@ -301,6 +307,7 @@ func (b *metricBucket) Exists(ctx context.Context, name string) (bool, error) {
 	ok, err := b.bkt.Exists(ctx, name)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation Exists failed", "err", err)
 	}
 	b.ops.WithLabelValues(op).Inc()
 	b.opsDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
@@ -315,6 +322,7 @@ func (b *metricBucket) Upload(ctx context.Context, name string, r io.Reader) err
 	err := b.bkt.Upload(ctx, name, r)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation Upload failed", "err", err)
 	} else {
 		// TODO: Use SetToCurrentTime() once we update the Prometheus client_golang.
 		b.lastSuccessfullUploadTime.WithLabelValues(b.bkt.Name()).Set(float64(time.Now().UnixNano()) / 1e9)
@@ -332,6 +340,7 @@ func (b *metricBucket) Delete(ctx context.Context, name string) error {
 	err := b.bkt.Delete(ctx, name)
 	if err != nil {
 		b.opsFailures.WithLabelValues(op).Inc()
+		level.Warn(b.logger).Log("msg", "bucket operation Delete failed", "err", err)
 	}
 	b.ops.WithLabelValues(op).Inc()
 	b.opsDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())

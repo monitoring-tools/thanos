@@ -469,6 +469,7 @@ func startStreamSeriesSet(
 				r, err := s.stream.Recv()
 				select {
 				case <-done:
+					s.closeSeries()
 					close(rCh)
 					return
 				case rCh <- &recvResponse{r: r, err: err}:
@@ -522,7 +523,6 @@ func startStreamSeriesSet(
 
 func (s *streamSeriesSet) handleErr(err error, done chan struct{}) {
 	defer close(done)
-	s.closeSeries()
 
 	if s.partialResponse {
 		level.Warn(s.logger).Log("err", err, "msg", "returning partial response")
