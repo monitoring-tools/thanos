@@ -30,6 +30,7 @@ func HTTPMiddleware(tracer opentracing.Tracer, name string, logger log.Logger, n
 		span = tracer.StartSpan(operationName, ext.RPCServerOption(wireContext))
 		ext.HTTPMethod.Set(span, r.Method)
 		ext.HTTPUrl.Set(span, r.URL.String())
+		span.LogKV("prometheus_link", r.Header.Get("Referer"))
 
 		// If client specified ForceTracingBaggageKey header, ensure span includes it to force tracing.
 		span.SetBaggageItem(ForceTracingBaggageKey, r.Header.Get(ForceTracingBaggageKey))

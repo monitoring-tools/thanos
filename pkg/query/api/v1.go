@@ -178,11 +178,32 @@ func NewAPI(
 	}
 }
 
+type responseWriter struct {
+	http.ResponseWriter
+
+	bytes int
+}
+
+func (w *responseWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += n
+
+	return n, err
+}
+
 // Register the API's endpoints in the given router.
 func (api *API) Register(r *route.Router, tracer opentracing.Tracer, logger log.Logger, ins extpromhttp.InstrumentationMiddleware) {
 	instr := func(name string, f ApiFunc) http.HandlerFunc {
 		hf := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			SetCORS(w)
+
+			span := opentracing.SpanFromContext(r.Context())
+			if span != nil {
+				w = &responseWriter{ResponseWriter: w}
+				defer func() {
+					span.SetTag("response_size", tracing.ByteCountIEC(int64(w.(*responseWriter).bytes)))
+				}()
+			}
 
 			var timerange float64
 			start, err := parseTime(r.FormValue("start"))
@@ -472,6 +493,7 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *ApiError) {
 	}
 
 	res := qry.Exec(ctx)
+
 	if res.Err != nil {
 		switch res.Err.(type) {
 		case promql.ErrQueryCanceled:
@@ -480,6 +502,9 @@ func (api *API) queryRange(r *http.Request) (interface{}, []error, *ApiError) {
 			return nil, nil, &ApiError{errorTimeout, res.Err}
 		}
 		return nil, nil, &ApiError{errorExec, res.Err}
+	}
+	if matrix, ok := res.Value.(promql.Matrix); ok {
+		span.SetTag("total_samples", matrix.TotalSamples())
 	}
 
 	return &queryData{
