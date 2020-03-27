@@ -65,6 +65,9 @@ func registerQuery(m map[string]setupFunc, app *kingpin.Application) {
 	maxConcurrentQueries := cmd.Flag("query.max-concurrent", "Maximum number of queries processed concurrently by query node.").
 		Default("20").Int()
 
+	maxConcurrentSubqueries := cmd.Flag("query.max-concurrent-subqueries", "Maximum number of sub-queries processed concurrently by query node.").
+		Default("5").Int()
+
 	replicaLabels := cmd.Flag("query.replica-label", "Labels to treat as a replica indicator along which data is deduplicated. Still you will be able to query without deduplication using 'dedup=false' parameter.").
 		Strings()
 
@@ -148,6 +151,7 @@ func registerQuery(m map[string]setupFunc, app *kingpin.Application) {
 			*webExternalPrefix,
 			*webPrefixHeaderName,
 			*maxConcurrentQueries,
+			*maxConcurrentSubqueries,
 			time.Duration(*queryTimeout),
 			time.Duration(*storeResponseTimeout),
 			*replicaLabels,
@@ -230,6 +234,7 @@ func runQuery(
 	webExternalPrefix string,
 	webPrefixHeaderName string,
 	maxConcurrentQueries int,
+	maxConcurrentSubqueries int,
 	queryTimeout time.Duration,
 	storeResponseTimeout time.Duration,
 	replicaLabels []string,
@@ -284,9 +289,10 @@ func runQuery(
 		queryableCreator = query.NewQueryableCreator(logger, proxy)
 		engine           = promql.NewEngine(
 			promql.EngineOpts{
-				Logger:        logger,
-				Reg:           reg,
-				MaxConcurrent: maxConcurrentQueries,
+				Logger:                 logger,
+				Reg:                    reg,
+				MaxConcurrent:          maxConcurrentQueries,
+				MaxConcurentSubqueries: maxConcurrentSubqueries,
 				// TODO(bwplotka): Expose this as a flag: https://github.com/thanos-io/thanos/issues/703.
 				MaxSamples: math.MaxInt32,
 				Timeout:    queryTimeout,
